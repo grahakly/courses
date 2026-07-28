@@ -248,9 +248,12 @@ class Doc:
             return
         self.set_fill(color)
         name = FONTS[style][0]
-        cs = (" %s Tc" % fmt(charspace)) if charspace else ""
-        self.op("BT /%s %s Tf%s 1 0 0 1 %s %s Tm (%s) Tj ET" %
-                (name, fmt(size), cs, fmt(x), fmt(y), esc(s).decode("latin-1")))
+        # Tc is part of the graphics state and is NOT reset by ET, so it must be
+        # written on every run -- otherwise one letter-spaced heading leaks its
+        # spacing into the rest of the page and every advance we computed is wrong.
+        self.op("BT /%s %s Tf %s Tc 1 0 0 1 %s %s Tm (%s) Tj ET" %
+                (name, fmt(size), fmt(charspace), fmt(x), fmt(y),
+                 esc(s).decode("latin-1")))
 
     # -- output ------------------------------------------------------------
     def output(self, path):
@@ -642,10 +645,18 @@ class Book(Doc):
             self.show((self.pw - w) / 2.0, self.mb - 30, n, "R", 8.6, MUTED)
             hdr = pg["header"]
             if hdr and i >= running_from:
-                self.show(self.ml, self.ph - self.mt + 30, hdr.upper(), "B", 7.4,
-                          MUTED, charspace=1.3)
-                w2 = text_width(title.upper(), "R", 7.4) + 1.3 * len(title)
+                size, cs = 7.4, 1.3
+                right = title.upper()
+                w2 = text_width(right, "R", size) + cs * len(right)
+                # truncate the left head to whatever space the right one leaves
+                avail = (self.pw - self.mr - w2 - 22) - self.ml
+                left = hdr.upper()
+                while (text_width(left, "B", size) + cs * len(left) > avail
+                       and len(left) > 4):
+                    left = left[:-2].rstrip(" ,;\u00b7") + "\u2026"
+                self.show(self.ml, self.ph - self.mt + 30, left, "B", size,
+                          MUTED, charspace=cs)
                 self.show(self.pw - self.mr - w2, self.ph - self.mt + 30,
-                          title.upper(), "R", 7.4, MUTED, charspace=1.3)
+                          right, "R", size, MUTED, charspace=cs)
                 self.line(self.ml, self.ph - self.mt + 22, self.pw - self.mr,
                           self.ph - self.mt + 22, RULE, 0.5)
