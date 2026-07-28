@@ -2977,58 +2977,5524 @@ guarantee.
 ---
 
 
+> **Format note for Questions 21 onward.** The same ten-part structure is used throughout, in a
+> tighter form: explanations are compressed to their load-bearing points so the book can cover
+> the full syllabus. Depth is unchanged where it matters (code, output, mistakes, follow-ups).
+
+## Question 21
+
+**Difficulty:** Easy
+**Category:** SQL -> Keys
+
+### Question
+
+Explain super key, candidate key, primary key, composite key, unique key and foreign key.
+
+### Answer
+
+A **super key** is any set of columns that uniquely identifies a row - including redundant ones.
+A **candidate key** is a *minimal* super key (remove any column and uniqueness breaks). The
+designer picks one candidate key as the **primary key**; the rest become **alternate keys**,
+usually enforced with `UNIQUE`. A **composite key** is any key made of two or more columns. A
+**foreign key** references a key in another table and enforces referential integrity.
+
+| Key | Unique | Allows NULL | Count per table |
+| --- | --- | --- | --- |
+| Primary | yes | no | 1 |
+| Unique | yes | yes (multiple NULLs in PG/MySQL) | many |
+| Foreign | no | yes | many |
+
+In our schema: `customers.customer_id` is the primary key, `customers.email` is a candidate key
+enforced as `UNIQUE`, `{customer_id, email}` is a super key but not a candidate key, and
+`order_items(order_id, product_id)` is a composite primary key.
+
+### Example
+
+`order_items` needs both columns to identify a line: order 1 contains two different products.
+
+### Code Example
+
+```sql
+-- composite primary key: neither column alone is unique
+SELECT order_id, product_id, quantity FROM order_items WHERE order_id = 1;
+
+-- alternate key enforcement; this violates the UNIQUE constraint on email
+INSERT INTO customers (full_name, email) VALUES ('Fake Aarav', 'aarav@example.com');
+
+-- foreign key protection: no such customer
+INSERT INTO orders (customer_id, order_date, status)
+VALUES (999, CURRENT_DATE, 'PENDING');
+```
+
+### Output
+
+```
+ order_id | product_id | quantity
+----------+------------+----------
+        1 |          1 |        1
+        1 |          3 |        2
+
+ERROR:  duplicate key value violates unique constraint "customers_email_key"
+ERROR:  insert or update on table "orders" violates foreign key constraint
+DETAIL:  Key (customer_id)=(999) is not present in table "customers".
+```
+
+### Why Interviewers Ask This
+
+It is the vocabulary check for database design. Candidates who cannot distinguish candidate key
+from super key usually also cannot justify a schema.
+
+### Common Mistakes
+
+- Calling every unique column a primary key.
+- Believing a super key must be minimal - that is the candidate key.
+- Assuming `UNIQUE` forbids `NULL`. In Postgres and MySQL multiple `NULL`s are allowed.
+- Using a natural key (email, phone) as the primary key, then discovering users change them.
+
+### Best Practices
+
+- Prefer a surrogate primary key (`SERIAL`, `BIGSERIAL`, `UUID`) and enforce natural keys with
+  `UNIQUE`.
+- Always index foreign keys - Postgres does not do it automatically.
+- Choose `ON DELETE` behaviour deliberately: `CASCADE`, `RESTRICT` or `SET NULL`.
+
+### Follow-up Questions
+
+1. When is a natural primary key the right choice?
+2. `UUID` versus `BIGSERIAL` as a primary key - index locality trade-offs?
+3. What breaks if you skip the index on a foreign key?
+4. What is a surrogate key and what are its downsides?
+
+### Real-world Scenario
+
+A billing system used `email` as the customer primary key. When a customer changed email, the
+`ON UPDATE CASCADE` rewrote 400,000 invoice rows and locked the table for eleven minutes during
+business hours. Migrating to a surrogate key removed the whole failure class.
+
+---
+
+## Question 22
+
+**Difficulty:** Medium
+**Category:** SQL -> Set operators
+
+### Question
+
+Compare `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT`.
+
+### Answer
+
+Set operators combine the *rows* of two result sets that have the same column count and
+compatible types (unlike joins, which combine columns).
+
+| Operator | Returns | Removes duplicates | Cost |
+| --- | --- | --- | --- |
+| `UNION` | rows in either | yes | sort or hash to dedupe |
+| `UNION ALL` | rows in either | no | cheapest - just concatenates |
+| `INTERSECT` | rows in both | yes | dedupe |
+| `EXCEPT` (`MINUS` in Oracle) | rows in the first but not the second | yes | dedupe |
+
+**`UNION ALL` is the default choice.** Reach for `UNION` only when duplicates are actually
+possible and undesirable - the deduplication is a real sort. For set operators, `NULL`s *are*
+treated as equal to each other, unlike in `=` comparisons.
+
+`ORDER BY` applies to the combined result and must appear once, at the end.
+
+### Example
+
+Contact list of Indian customers plus everyone who ever contacted support, and the set
+difference between cities that ordered and cities that did not.
+
+### Code Example
+
+```sql
+-- UNION removes the overlap (Aarav is both Indian and a support contact)
+SELECT full_name, 'india'   AS source FROM customers WHERE country = 'India'
+UNION
+SELECT full_name, 'support' AS source FROM customers WHERE last_support_contact IS NOT NULL
+ORDER BY full_name;
+
+-- INTERSECT: customers who are BOTH Indian and have contacted support
+SELECT full_name FROM customers WHERE country = 'India'
+INTERSECT
+SELECT full_name FROM customers WHERE last_support_contact IS NOT NULL;
+
+-- EXCEPT: Indian customers who never contacted support
+SELECT full_name FROM customers WHERE country = 'India'
+EXCEPT
+SELECT full_name FROM customers WHERE last_support_contact IS NOT NULL;
+```
+
+### Output
+
+```
+-- UNION (5 rows; the 'source' column makes rows distinct, so both Aarav rows survive)
+  full_name   | source
+--------------+---------
+ Aarav Sharma | india
+ Aarav Sharma | support
+ Diya Patel   | india
+ Meera Iyer   | india
+ Meera Iyer   | support
+ Rohan Verma  | india
+
+-- INTERSECT
+  full_name
+--------------
+ Aarav Sharma
+ Meera Iyer
+
+-- EXCEPT
+  full_name
+-------------
+ Diya Patel
+ Rohan Verma
+```
+
+Note the trap in the first query: adding the `source` literal makes the rows differ, so `UNION`
+cannot collapse them. Deduplication compares the **whole row**.
+
+### Why Interviewers Ask This
+
+`UNION` versus `UNION ALL` is a cheap performance question with a clear right answer, and the
+whole-row deduplication subtlety catches people who assume it dedupes on the first column.
+
+### Common Mistakes
+
+- Using `UNION` habitually and paying for a sort on every query.
+- Expecting `EXCEPT` to be symmetric - it is not; order matters.
+- Mismatched column counts or incompatible types.
+- Putting `ORDER BY` in each branch instead of once at the end.
+
+### Best Practices
+
+- Default to `UNION ALL`; justify `UNION` when you use it.
+- Keep column lists explicit and aligned across branches.
+- For anti-set logic on large tables, benchmark `EXCEPT` against `NOT EXISTS` - the latter often
+  wins because it can stop early.
+
+### Follow-up Questions
+
+1. Why does `UNION` treat `NULL = NULL` as equal here but `WHERE` does not?
+2. Rewrite the `EXCEPT` query with `NOT EXISTS` and compare plans.
+3. How would you emulate `FULL OUTER JOIN` with `UNION ALL`?
+4. Does `UNION ALL` preserve input order? (No guarantee without `ORDER BY`.)
+
+### Real-world Scenario
+
+A data pipeline merged 40 daily partitions with `UNION` "to be safe". The dedupe sorted 200
+million rows nightly and needed 30 GB of temp space. The partitions were disjoint by
+construction, so `UNION ALL` was correct - runtime dropped from 25 minutes to 90 seconds.
+
+---
+
+## Question 23
+
+**Difficulty:** Medium
+**Category:** SQL -> Pagination
+
+### Question
+
+How do you paginate results? Why does `OFFSET` degrade, and what is keyset pagination?
+
+### Answer
+
+`LIMIT n OFFSET m` is the obvious approach and it is **O(m + n)**: the database must generate and
+discard the first `m` rows before returning anything. At `OFFSET 500000` it reads half a million
+rows to return twenty. There is a second, worse problem: if rows are inserted or deleted between
+requests, the window shifts and users see duplicated or skipped rows.
+
+**Keyset (cursor) pagination** instead remembers the last row's sort key and asks for rows after
+it:
+
+```sql
+WHERE (order_date, order_id) < (:last_date, :last_id)
+ORDER BY order_date DESC, order_id DESC
+LIMIT 20
+```
+
+This is **O(log n + limit)** with a matching index, and it is stable under concurrent writes.
+The trade-off: you cannot jump to an arbitrary page number, only next/previous. That is
+acceptable for feeds and infinite scroll, not for a "page 47" control.
+
+The row-constructor comparison `(a, b) < (x, y)` is the correct way to break ties; comparing only
+the date loses rows that share a timestamp.
+
+### Example
+
+Paging through orders newest first, 3 per page.
+
+### Code Example
+
+```sql
+-- OFFSET pagination: simple, degrades with depth, unstable under writes
+SELECT order_id, order_date FROM orders
+ORDER BY order_date DESC, order_id DESC
+LIMIT 3 OFFSET 3;
+
+-- Keyset pagination: page 1
+SELECT order_id, order_date FROM orders
+ORDER BY order_date DESC, order_id DESC
+LIMIT 3;
+-- last row returned was (2025-04-02, 6) -> feed it back as the cursor
+
+-- Keyset pagination: page 2, using the row constructor for correct tie-breaking
+SELECT order_id, order_date FROM orders
+WHERE  (order_date, order_id) < (DATE '2025-04-02', 6)
+ORDER  BY order_date DESC, order_id DESC
+LIMIT  3;
+
+-- Index that makes keyset pagination O(log n)
+CREATE INDEX idx_orders_keyset ON orders (order_date DESC, order_id DESC);
+
+-- Total count for a UI page indicator is expensive; estimate instead
+SELECT reltuples::bigint AS estimated_rows FROM pg_class WHERE relname = 'orders';
+```
+
+### Output
+
+```
+-- OFFSET 3 (page 2)
+ order_id | order_date
+----------+------------
+        6 | 2025-04-02
+        5 | 2025-03-15
+        3 | 2025-02-20
+
+-- keyset page 1
+ order_id | order_date
+----------+------------
+        8 | 2025-05-09
+        7 | 2025-04-18
+        6 | 2025-04-02
+
+-- keyset page 2
+ order_id | order_date
+----------+------------
+        5 | 2025-03-15
+        3 | 2025-02-20
+        2 | 2025-02-14
+```
+
+### Why Interviewers Ask This
+
+Deep `OFFSET` is one of the most common real-world performance bugs, and keyset pagination is the
+standard fix used by every large feed. Knowing it signals production experience.
+
+### Common Mistakes
+
+- `LIMIT` without `ORDER BY` - arbitrary, unstable results.
+- Ordering by a non-unique column only, so rows with equal values are duplicated or skipped
+  across pages.
+- Running `COUNT(*)` over the whole table on every page request.
+- Comparing cursor columns separately with `AND`, which is not equivalent to the row constructor.
+
+### Best Practices
+
+- Keyset pagination for feeds and APIs; opaque, signed cursor tokens rather than raw ids.
+- Always end `ORDER BY` with a unique column.
+- Cap `limit` server-side and reject unbounded requests.
+- Estimate totals from `pg_class.reltuples` or omit exact counts entirely.
+
+### Follow-up Questions
+
+1. How do you support "previous page" with keyset pagination?
+2. Why must the cursor columns match the index order exactly?
+3. How would you paginate when the sort column is user-selectable?
+4. What breaks if the cursor row is deleted between requests? (Nothing - comparison still works.)
+
+### Real-world Scenario
+
+An admin console let staff page through 12 million audit rows. Page 1 was instant, page 4000
+timed out at 30 seconds and pinned a CPU. Switching to keyset pagination with a composite index
+made every page respond in under 15 ms, at the cost of removing the page-number jump control.
+
+---
+
+## Question 24
+
+**Difficulty:** Medium
+**Category:** SQL -> Views, materialised views
+
+### Question
+
+What is a view? How does a materialised view differ, and when do you use each?
+
+### Answer
+
+A **view** is a stored query. It holds no data; every reference re-executes the underlying SQL.
+Benefits: encapsulation, a stable interface over a changing schema, and column-level security.
+Cost: no performance gain whatsoever - it is a macro.
+
+A **materialised view** stores the *result* on disk. Reads are as fast as a table (and it can be
+indexed), but the data is a snapshot that goes stale until refreshed.
+
+| | View | Materialised view |
+| --- | --- | --- |
+| Stores data | no | yes |
+| Read cost | cost of the query | cost of a table scan or index lookup |
+| Freshness | always current | stale until refreshed |
+| Indexable | no | yes |
+| Write-through | sometimes (simple views are updatable) | never |
+
+`REFRESH MATERIALIZED VIEW` takes an exclusive lock and blocks readers;
+`REFRESH ... CONCURRENTLY` does not, but requires a `UNIQUE` index and does more work.
+
+Use a view for abstraction and permissioning. Use a materialised view when an expensive
+aggregate is read far more often than the data changes, and minutes of staleness are acceptable.
+
+### Example
+
+A customer revenue summary read on every dashboard load but recomputed only hourly.
+
+### Code Example
+
+```sql
+-- Plain view: always fresh, recomputed every time
+CREATE VIEW v_customer_orders AS
+SELECT c.customer_id, c.full_name, c.country,
+       COUNT(o.order_id) AS order_count
+FROM   customers c
+LEFT   JOIN orders o ON o.customer_id = c.customer_id
+GROUP  BY c.customer_id, c.full_name, c.country;
+
+SELECT full_name, order_count FROM v_customer_orders WHERE order_count = 0;
+
+-- Materialised view: snapshot, indexable
+CREATE MATERIALIZED VIEW mv_customer_revenue AS
+SELECT c.customer_id, c.full_name,
+       COALESCE(SUM(oi.quantity * oi.unit_price), 0) AS lifetime_value
+FROM   customers c
+LEFT   JOIN orders o      ON o.customer_id = c.customer_id AND o.status <> 'CANCELLED'
+LEFT   JOIN order_items oi ON oi.order_id  = o.order_id
+GROUP  BY c.customer_id, c.full_name;
+
+-- UNIQUE index is required for CONCURRENTLY, and speeds up lookups
+CREATE UNIQUE INDEX mv_cust_rev_pk ON mv_customer_revenue (customer_id);
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_customer_revenue;  -- no reader blocking
+
+-- Security use of a plain view: hide the email column from analysts
+CREATE VIEW v_customers_public AS
+SELECT customer_id, full_name, city, country FROM customers;
+GRANT SELECT ON v_customers_public TO analyst_role;
+```
+
+### Output
+
+```
+ full_name  | order_count
+------------+-------------
+ Sara Khan  |           0
+
+REFRESH MATERIALIZED VIEW
+
+SELECT full_name, lifetime_value FROM mv_customer_revenue ORDER BY 2 DESC LIMIT 3;
+  full_name   | lifetime_value
+--------------+----------------
+ Aarav Sharma |      197493.00
+ John Carter  |       16497.00
+ Diya Patel   |       13997.00
+```
+
+### Why Interviewers Ask This
+
+It tests whether you know that a view is not a cache - a very common misconception - and whether
+you can reason about the staleness-versus-speed trade-off.
+
+### Common Mistakes
+
+- Believing a plain view improves performance.
+- Nesting views five deep; the planner inlines them all and the resulting query is unreadable
+  and often unoptimisable.
+- Using `REFRESH` without `CONCURRENTLY` in production and blocking every reader.
+- Forgetting the materialised view is stale, then reporting yesterday's numbers as live.
+
+### Best Practices
+
+- Views for abstraction and permissions; materialised views for expensive read-heavy aggregates.
+- Refresh on a schedule or a trigger, and expose `last_refreshed_at` in the UI.
+- Keep view nesting to one level.
+- Consider a summary table maintained incrementally when even `CONCURRENTLY` is too slow.
+
+### Follow-up Questions
+
+1. When is a view updatable, and what is an `INSTEAD OF` trigger for?
+2. How would you build incremental refresh rather than full recompute?
+3. What locks does `REFRESH MATERIALIZED VIEW` take, with and without `CONCURRENTLY`?
+4. Compare a materialised view with a Redis cache for the same aggregate.
+
+### Real-world Scenario
+
+An analytics page ran a 14-second aggregate on every load. Wrapping it in a plain view changed
+nothing, which surprised the team. Converting to a materialised view refreshed every 10 minutes
+took page load to 40 ms, and the product owner agreed 10-minute staleness was fine for revenue
+trend charts.
+
+---
+
+## Question 25
+
+**Difficulty:** Hard
+**Category:** SQL -> Locks, deadlocks
+
+### Question
+
+What is a deadlock? Show how one forms and how you prevent it.
+
+### Answer
+
+A deadlock is a cycle of lock waits: transaction A holds a lock B needs, and B holds a lock A
+needs. Neither can proceed. The database detects the cycle and **kills one transaction** (the
+victim) so the other completes. Postgres raises SQLSTATE `40P01`.
+
+```
+   T1 holds row 1 ---- waits for ----> row 2 held by T2
+        ^                                    |
+        |________ waits for row 1 ___________|
+```
+
+Lock types worth naming: row-level (`FOR UPDATE` exclusive, `FOR SHARE` shared) and table-level
+(`ACCESS SHARE` for `SELECT` up to `ACCESS EXCLUSIVE` for `DROP`/`ALTER`). Deadlocks come mostly
+from **inconsistent ordering** of row updates across code paths, and from lock escalation caused
+by long transactions.
+
+Prevention, in order of effectiveness:
+
+1. **Always acquire locks in a deterministic order** - for example ascending primary key. If
+   every transaction locks row 1 before row 2, no cycle can form.
+2. **Keep transactions short** - less overlap, less contention.
+3. **Use a single atomic statement** where possible; one statement cannot deadlock with itself.
+4. **Retry on `40P01`** with jitter - deadlocks are a normal, expected condition at scale.
+5. `SELECT ... FOR UPDATE NOWAIT` or `SKIP LOCKED` for queue workloads.
+
+### Example
+
+Two transfers between the same two accounts, in opposite directions.
+
+### Code Example
+
+```sql
+-- ============ DEADLOCK: opposite lock order ============
+-- Session A                                | Session B
+BEGIN;                                      -- BEGIN;
+UPDATE payments SET balance = balance - 100 -- UPDATE payments SET balance = balance - 50
+ WHERE payment_id = 1;   -- locks row 1     --  WHERE payment_id = 2;   -- locks row 2
+                                            --
+UPDATE payments SET balance = balance + 100 -- UPDATE payments SET balance = balance + 50
+ WHERE payment_id = 2;   -- WAITS for B     --  WHERE payment_id = 1;   -- WAITS for A
+-- ERROR:  deadlock detected
+-- DETAIL: Process 812 waits for ShareLock on transaction 5541; blocked by process 840.
+
+-- ============ FIX 1: deterministic lock order ============
+BEGIN;
+-- lock both rows up front, always in ascending id order
+SELECT payment_id FROM payments
+WHERE  payment_id IN (1, 2)
+ORDER  BY payment_id            -- the crucial line
+FOR    UPDATE;
+
+UPDATE payments SET balance = balance - 100 WHERE payment_id = 1;
+UPDATE payments SET balance = balance + 100 WHERE payment_id = 2;
+COMMIT;
+
+-- ============ FIX 2: single atomic statement, no ordering problem ============
+UPDATE payments
+SET    balance = balance + CASE payment_id WHEN 1 THEN -100 ELSE 100 END
+WHERE  payment_id IN (1, 2);
+
+-- ============ Queue pattern: never block, just take the next free row ============
+SELECT order_id FROM orders
+WHERE  status = 'PENDING'
+ORDER  BY order_id
+FOR    UPDATE SKIP LOCKED
+LIMIT  1;
+
+-- Diagnose live blocking
+SELECT pid, wait_event_type, wait_event, state,
+       LEFT(query, 60) AS query
+FROM   pg_stat_activity
+WHERE  wait_event_type = 'Lock';
+```
+
+### Output
+
+```
+-- Session A
+ERROR:  deadlock detected
+DETAIL:  Process 812 waits for ShareLock on transaction 5541; blocked by process 840.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,3) in relation "payments"
+
+-- Session B completes normally
+UPDATE 1
+COMMIT
+
+-- after FIX 1, both sessions succeed
+COMMIT
+COMMIT
+```
+
+### Why Interviewers Ask This
+
+Deadlocks are a senior-level concurrency signal. The expected answer is not "the database
+handles it" but "order your locks deterministically and retry the victim".
+
+### Common Mistakes
+
+- Thinking a deadlock hangs forever - the detector resolves it in about a second by default.
+- Blaming isolation level. Deadlocks occur at every isolation level.
+- Retrying the victim immediately with no backoff, causing a retry storm.
+- Holding locks across an external HTTP call inside a transaction.
+- Confusing a deadlock (cycle, auto-resolved) with lock contention (slow, not resolved).
+
+### Best Practices
+
+- Codify a lock-ordering rule in the team's coding standard - "always by ascending primary key".
+- Bounded retry with jitter on `40P01` and `40001`.
+- `SKIP LOCKED` for job queues; `NOWAIT` when the caller can fail fast.
+- Set `deadlock_timeout` and log deadlocks; treat a rising rate as a design smell.
+- Batch operations in a consistent order - sort ids before the loop.
+
+### Follow-up Questions
+
+1. Difference between a deadlock and simple lock contention?
+2. How does `SKIP LOCKED` implement a work queue safely?
+3. Can `SELECT` statements deadlock with each other? (Not with plain reads under MVCC.)
+4. What is lock escalation, and does Postgres do it? (No - SQL Server does.)
+5. How would you find the two queries involved after the fact?
+
+### Real-world Scenario
+
+An inventory service updated multiple SKUs per order by iterating the cart in the order the user
+added items. Two customers with overlapping carts in opposite order deadlocked several hundred
+times a day during sales. Sorting the cart by `product_id` before the update loop - a one-line
+change - eliminated them entirely.
+
+---
+
+## Question 26
+
+**Difficulty:** Medium
+**Category:** SQL -> Normalisation
+
+### Question
+
+Explain 1NF, 2NF, 3NF and BCNF with a single worked example. When would you denormalise?
+
+### Answer
+
+Normalisation removes redundancy so that each fact is stored **once**, eliminating update
+anomalies.
+
+- **1NF** - atomic values, no repeating groups. No comma-separated lists in a column.
+- **2NF** - 1NF plus: no *partial* dependency. Every non-key column depends on the **whole**
+  composite key, not part of it.
+- **3NF** - 2NF plus: no *transitive* dependency. Non-key columns must not depend on other
+  non-key columns.
+- **BCNF** - stricter 3NF: every determinant is a candidate key. Fixes the rare case where a
+  non-key column determines part of a key.
+
+Mnemonic: **1NF** kills repeating groups, **2NF** kills partial dependencies, **3NF** kills
+transitive dependencies, **BCNF** kills the leftovers.
+
+**Denormalise deliberately** when read performance demands it: precomputed totals, duplicated
+display names to avoid a join, or a reporting star schema. The price is that you now own
+consistency - every copy must be updated together, usually by trigger, application logic, or a
+scheduled reconciliation job. Denormalise for measured read pressure, never for convenience.
+
+### Example
+
+A single flat order table, walked to BCNF.
+
+### Code Example
+
+```sql
+-- ===== 0NF / violates 1NF : repeating group in one column =====
+-- order_id | customer      | products
+--        1 | Aarav Sharma  | 'UltraBook, Keyboard, Keyboard'
+
+-- ===== 1NF : atomic values, one row per product =====
+CREATE TABLE orders_1nf (
+    order_id     INT, product_id INT, product_name TEXT, unit_price NUMERIC,
+    customer_id  INT, customer_name TEXT, customer_city TEXT, city_pincode TEXT,
+    PRIMARY KEY (order_id, product_id)
+);
+-- Problems: product_name depends only on product_id (partial dependency),
+-- customer_name depends only on order_id via customer_id (transitive).
+
+-- ===== 2NF : remove partial dependencies on the composite key =====
+CREATE TABLE products_2nf (
+    product_id   INT PRIMARY KEY,
+    product_name TEXT NOT NULL,
+    unit_price   NUMERIC NOT NULL          -- depends on product_id alone
+);
+CREATE TABLE order_items_2nf (
+    order_id   INT, product_id INT REFERENCES products_2nf,
+    quantity   INT NOT NULL,
+    PRIMARY KEY (order_id, product_id)
+);
+
+-- ===== 3NF : remove the transitive dependency city -> pincode =====
+CREATE TABLE cities_3nf (
+    city     TEXT PRIMARY KEY,
+    pincode  TEXT NOT NULL                 -- pincode depended on city, not on customer_id
+);
+CREATE TABLE customers_3nf (
+    customer_id INT PRIMARY KEY,
+    full_name   TEXT NOT NULL,
+    city        TEXT REFERENCES cities_3nf
+);
+CREATE TABLE orders_3nf (
+    order_id    INT PRIMARY KEY,
+    customer_id INT NOT NULL REFERENCES customers_3nf,
+    order_date  DATE NOT NULL
+);
+
+-- ===== Deliberate denormalisation, with a maintenance strategy =====
+ALTER TABLE orders_3nf ADD COLUMN order_total NUMERIC(12,2);
+
+CREATE OR REPLACE FUNCTION refresh_order_total() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE orders_3nf o
+    SET    order_total = (SELECT COALESCE(SUM(quantity * p.unit_price), 0)
+                          FROM   order_items_2nf oi
+                          JOIN   products_2nf p ON p.product_id = oi.product_id
+                          WHERE  oi.order_id = o.order_id)
+    WHERE  o.order_id = COALESCE(NEW.order_id, OLD.order_id);
+    RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_order_total
+AFTER INSERT OR UPDATE OR DELETE ON order_items_2nf
+FOR EACH ROW EXECUTE FUNCTION refresh_order_total();
+```
+
+### Output
+
+```
+-- update anomaly BEFORE normalisation: a price change must touch every historical row
+UPDATE orders_1nf SET unit_price = 79999 WHERE product_id = 1;
+UPDATE 2            -- and any row you miss is now inconsistent
+
+-- AFTER normalisation: one row holds the fact
+UPDATE products_2nf SET unit_price = 79999 WHERE product_id = 1;
+UPDATE 1
+
+-- denormalised total kept correct by the trigger
+INSERT INTO order_items_2nf VALUES (1, 3, 2);
+SELECT order_id, order_total FROM orders_3nf WHERE order_id = 1;
+ order_id | order_total
+----------+-------------
+        1 |     9998.00
+```
+
+### Why Interviewers Ask This
+
+Normal forms are the standard DBMS interview topic and they reveal whether a candidate can spot
+update anomalies in a schema. The denormalisation follow-up separates textbook knowledge from
+production judgement.
+
+### Common Mistakes
+
+- Reciting definitions without being able to identify the violation in a given table.
+- Confusing partial dependency (2NF) with transitive dependency (3NF).
+- Normalising to 5NF everywhere and creating a nine-way join for every page load.
+- Denormalising without any mechanism to keep copies consistent.
+- Storing a historical price only in `products` - order history must snapshot the price paid,
+  which is *not* a normalisation violation.
+
+### Best Practices
+
+- Design to 3NF, then denormalise with evidence from query plans and latency data.
+- Every denormalised column needs a documented owner: trigger, application, or batch job.
+- Snapshot values that are historically meaningful (price at purchase) by design.
+- Add a reconciliation job that asserts derived values match their source.
+
+### Follow-up Questions
+
+1. Give a table in 3NF but not BCNF.
+2. What are 4NF and 5NF, and does anyone use them?
+3. How do star and snowflake schemas relate to normalisation?
+4. Why is `order_items.unit_price` not a 3NF violation?
+5. How would you validate a denormalised total without downtime?
+
+### Real-world Scenario
+
+An order list page joined five tables to display a total and took 800 ms at p95. Adding a
+trigger-maintained `order_total` column dropped it to 25 ms. Six months later a bulk import
+bypassed the trigger with `COPY`, and totals silently drifted on 12,000 orders. The lesson was
+not "denormalisation is bad" but "every derived column needs a reconciliation job".
+
+---
+
+## Question 27
+
+**Difficulty:** Hard
+**Category:** SQL -> Query optimisation, EXPLAIN
+
+### Question
+
+Walk me through how you diagnose a slow query. What do you look for in `EXPLAIN ANALYZE`?
+
+### Answer
+
+A repeatable method beats guessing:
+
+1. **Find the query.** `pg_stat_statements` ordered by `total_exec_time` - optimise what actually
+   costs the most, not what feels slow.
+2. **Get the real plan.** `EXPLAIN (ANALYZE, BUFFERS)`. `ANALYZE` executes it and reports actual
+   rows and time; `BUFFERS` shows cache hits versus disk reads.
+3. **Compare estimated versus actual rows.** A large mismatch means bad statistics - the root
+   cause of most bad plan choices. Fix with `ANALYZE`, a higher statistics target, or extended
+   statistics for correlated columns.
+4. **Find the expensive node.** Read the plan inside-out; look for the node where actual time
+   jumps.
+5. **Check the access method.** `Seq Scan` on a large table with a selective filter means a
+   missing or unusable index. On a small table it is correct.
+6. **Check the join strategy.** Nested Loop is great for few rows, catastrophic for many. Hash
+   Join suits large unsorted sets; Merge Join suits pre-sorted input.
+7. **Look for spills.** `Sort Method: external merge Disk: 240MB` means `work_mem` is too small.
+8. **Fix and re-measure.** Index, rewrite, or configuration - then verify with the same plan.
+
+Red flags summary:
+
+| Symptom | Likely cause |
+| --- | --- |
+| `rows=1` estimated, `rows=48000` actual | stale statistics |
+| `Seq Scan` + selective `WHERE` | missing or unusable index |
+| Nested Loop with large outer | bad row estimate |
+| `Sort ... Disk` | `work_mem` too low |
+| `Rows Removed by Filter` very high | index does not match the predicate |
+| `Heap Fetches` high on index-only scan | table needs `VACUUM` |
+
+### Example
+
+A revenue query filtered on a function-wrapped date column.
+
+### Code Example
+
+```sql
+-- Slow: the function on the column makes any plain index on order_date unusable
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT customer_id, COUNT(*)
+FROM   orders
+WHERE  EXTRACT(YEAR FROM order_date) = 2025
+GROUP  BY customer_id;
+
+-- Fix A: rewrite as a sargable range so a B-tree index can be used
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT customer_id, COUNT(*)
+FROM   orders
+WHERE  order_date >= DATE '2025-01-01'
+  AND  order_date <  DATE '2026-01-01'
+GROUP  BY customer_id;
+
+-- Fix B: if the function form is unavoidable, index the expression
+CREATE INDEX idx_orders_year ON orders ((EXTRACT(YEAR FROM order_date)));
+
+-- Statistics maintenance
+ANALYZE orders;
+ALTER TABLE orders ALTER COLUMN customer_id SET STATISTICS 500;
+CREATE STATISTICS stat_orders_cust_status (dependencies)
+    ON customer_id, status FROM orders;   -- correlated columns
+
+-- Find the real offenders
+SELECT LEFT(query, 60) AS query, calls,
+       ROUND(total_exec_time::numeric, 1) AS total_ms,
+       ROUND(mean_exec_time::numeric, 2)  AS mean_ms
+FROM   pg_stat_statements
+ORDER  BY total_exec_time DESC
+LIMIT  5;
+```
+
+### Output
+
+```
+-- BEFORE: function on the column forces a full scan
+ HashAggregate  (cost=1.32..1.38 rows=6 width=12) (actual time=0.089..0.092 rows=5 loops=1)
+   ->  Seq Scan on orders  (cost=0.00..1.28 rows=4 width=4)
+                           (actual time=0.021..0.048 rows=8 loops=1)
+         Filter: (EXTRACT(year FROM order_date) = 2025)
+         Rows Removed by Filter: 0
+   Buffers: shared hit=1
+ Execution Time: 0.142 ms
+
+-- AFTER (on a large table): index range scan instead of a full scan
+ HashAggregate  (actual time=12.4..12.9 rows=4812 loops=1)
+   ->  Index Only Scan using idx_orders_keyset on orders
+        (actual time=0.031..6.204 rows=61233 loops=1)
+        Index Cond: ((order_date >= '2025-01-01') AND (order_date < '2026-01-01'))
+        Heap Fetches: 0
+   Buffers: shared hit=412
+ Execution Time: 13.1 ms      -- was 1840 ms with the Seq Scan
+```
+
+### Why Interviewers Ask This
+
+This is the practical performance question for mid and senior roles. They want a *method*, plus
+the vocabulary - sargable, statistics, join strategies, spill to disk. Candidates who jump
+straight to "add an index" without reading the plan are marked down.
+
+### Common Mistakes
+
+- Using `EXPLAIN` without `ANALYZE` and reasoning about estimates as if they were measurements.
+- Optimising the query someone complained about instead of the top entry in
+  `pg_stat_statements`.
+- Adding indexes blindly, one per complaint, ending with 14 indexes on one table.
+- Ignoring the estimated-versus-actual row gap, which is usually the actual root cause.
+- Forgetting `EXPLAIN ANALYZE` on `UPDATE`/`DELETE` really executes - wrap it in a transaction
+  and roll back.
+
+### Best Practices
+
+- Keep predicates sargable: no functions or arithmetic on the indexed column.
+- Run `ANALYZE` after bulk loads; check autovacuum is keeping up.
+- Raise `work_mem` per-session for known heavy sorts rather than globally.
+- Store the plan in the ticket before and after, so the improvement is auditable.
+- Use `auto_explain` to capture plans for slow queries in production.
+
+### Follow-up Questions
+
+1. What does "sargable" mean and why does `WHERE UPPER(name) = 'X'` break an index?
+2. When is a `Seq Scan` the correct plan?
+3. How do Nested Loop, Hash Join and Merge Join differ, and when does the planner pick each?
+4. What are extended statistics for, and which estimate error do they fix?
+5. `EXPLAIN` cost units - what are they, and why are they not milliseconds?
+
+### Real-world Scenario
+
+A nightly report degraded from 4 minutes to 40 over a quarter. The plan showed a Nested Loop
+with an estimate of 12 rows against 900,000 actual - autovacuum had been disabled on that table
+during a migration and never re-enabled, so statistics were three months stale. A single
+`ANALYZE` restored the Hash Join and the 4-minute runtime. No index or query change was needed.
+
+---
+
+## Question 28
+
+**Difficulty:** Hard
+**Category:** SQL -> Partitioning
+
+### Question
+
+What is table partitioning? Compare it with sharding and show a partitioned table.
+
+### Answer
+
+**Partitioning** splits one logical table into physical child tables inside the *same* database.
+The planner uses **partition pruning** to touch only the relevant children. Strategies:
+
+- **Range** - by date. The most common; ideal for time-series and retention.
+- **List** - by discrete value such as region or tenant.
+- **Hash** - by a hash of a key, for even distribution when there is no natural range.
+
+Benefits: pruning reduces scanned data, maintenance operates per partition, and dropping old
+data becomes `DROP TABLE` (instant) instead of `DELETE` (slow, bloating).
+
+**Sharding** splits data across *different* database servers. It is the answer to running out of
+one machine, and it brings cross-shard joins, distributed transactions, and rebalancing pain.
+
+| | Partitioning | Sharding |
+| --- | --- | --- |
+| Scope | one server | many servers |
+| Solves | scan volume, maintenance, retention | capacity and throughput ceilings |
+| Cross-partition query | transparent | application or proxy must fan out |
+| Transactions | normal ACID | distributed, or avoided |
+| Operational cost | low | high |
+
+Rule: **partition first, shard only when a single node genuinely cannot cope.**
+
+The partition key must appear in the `WHERE` clause for pruning to happen, and it must be part
+of the primary key.
+
+### Example
+
+`orders` partitioned by month, with retention by dropping partitions.
+
+### Code Example
+
+```sql
+-- Declarative range partitioning (Postgres 12+)
+CREATE TABLE orders_p (
+    order_id    BIGSERIAL,
+    customer_id INT  NOT NULL,
+    order_date  DATE NOT NULL,
+    status      VARCHAR(20) NOT NULL,
+    PRIMARY KEY (order_id, order_date)          -- key must include the partition column
+) PARTITION BY RANGE (order_date);
+
+CREATE TABLE orders_2025_01 PARTITION OF orders_p
+    FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+CREATE TABLE orders_2025_02 PARTITION OF orders_p
+    FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
+CREATE TABLE orders_2025_03 PARTITION OF orders_p
+    FOR VALUES FROM ('2025-03-01') TO ('2025-04-01');
+CREATE TABLE orders_default PARTITION OF orders_p DEFAULT;   -- catch-all
+
+-- Indexes defined on the parent propagate to every partition
+CREATE INDEX ON orders_p (customer_id);
+
+INSERT INTO orders_p (customer_id, order_date, status)
+SELECT customer_id, order_date, status FROM orders;
+
+-- PRUNING: only the February child is scanned
+EXPLAIN (ANALYZE)
+SELECT COUNT(*) FROM orders_p
+WHERE order_date >= '2025-02-01' AND order_date < '2025-03-01';
+
+-- NO PRUNING: partition key absent, every partition is scanned
+EXPLAIN SELECT COUNT(*) FROM orders_p WHERE customer_id = 1;
+
+-- Retention: instant, no bloat, versus a multi-hour DELETE
+DROP TABLE orders_2025_01;
+-- or keep the data but detach it from the live table
+-- ALTER TABLE orders_p DETACH PARTITION orders_2025_01 CONCURRENTLY;
+
+-- Hash partitioning when there is no natural range
+CREATE TABLE events_p (event_id BIGINT, tenant_id INT NOT NULL, payload JSONB)
+    PARTITION BY HASH (tenant_id);
+CREATE TABLE events_p0 PARTITION OF events_p FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE events_p1 PARTITION OF events_p FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+```
+
+### Output
+
+```
+-- WITH the partition key: one partition touched
+ Aggregate  (actual time=0.048..0.049 rows=1 loops=1)
+   ->  Seq Scan on orders_2025_02 orders_p  (actual time=0.019..0.026 rows=2 loops=1)
+         Filter: ((order_date >= '2025-02-01') AND (order_date < '2025-03-01'))
+ Execution Time: 0.093 ms
+
+-- WITHOUT it: every partition scanned (append over 4 children)
+ Aggregate
+   ->  Append
+         ->  Seq Scan on orders_2025_01 orders_p_1
+         ->  Seq Scan on orders_2025_02 orders_p_2
+         ->  Seq Scan on orders_2025_03 orders_p_3
+         ->  Seq Scan on orders_default  orders_p_4
+
+DROP TABLE
+```
+
+### Why Interviewers Ask This
+
+Partitioning is where SQL meets system design, and the partition-key discipline (prune or scan
+everything) is a concrete, testable insight. It also leads naturally into sharding, which is a
+system design conversation.
+
+### Common Mistakes
+
+- Partitioning without including the partition key in queries, so nothing prunes and you have
+  added complexity for nothing.
+- Omitting the partition column from the primary key - Postgres rejects it.
+- Creating hundreds of partitions and hitting planning-time overhead.
+- Forgetting a `DEFAULT` partition, so an out-of-range insert fails.
+- Confusing partitioning with sharding in an interview - they solve different problems.
+
+### Best Practices
+
+- Choose the partition key from the dominant query filter, usually a date.
+- Automate partition creation ahead of time (`pg_partman` or a scheduled job).
+- Keep partition counts in the tens to low hundreds.
+- Use `DETACH CONCURRENTLY` then `DROP` for retention, avoiding long locks.
+- Global uniqueness across partitions is not enforced - design around it.
+
+### Follow-up Questions
+
+1. Why must the partition key be part of the primary key?
+2. What is partition-wise join and when does the planner use it?
+3. How do you pick a shard key, and what makes a bad one?
+4. Compare range, list and hash partitioning for a multi-tenant SaaS.
+5. How would you migrate a 2 TB live table to a partitioned one with no downtime?
+
+### Real-world Scenario
+
+An events table reached 1.4 billion rows. The nightly `DELETE` of 90-day-old data ran for six
+hours, bloated the table, and starved autovacuum. Converting to monthly range partitions turned
+retention into a one-second `DROP TABLE`, and typical dashboard queries dropped from 22 seconds
+to 400 ms purely from pruning.
+
+---
+
+## Question 29
+
+**Difficulty:** Medium
+**Category:** SQL -> Stored procedures, functions, triggers
+
+### Question
+
+Compare stored procedures, functions and triggers. When is a trigger the wrong tool?
+
+### Answer
+
+| | Function | Procedure | Trigger |
+| --- | --- | --- | --- |
+| Returns a value | yes, required | optional (`OUT`/`INOUT`) | no (returns `NULL` or `NEW`) |
+| Callable in `SELECT` | yes | no - use `CALL` | never called directly |
+| Can manage transactions | no (runs inside caller's) | yes - `COMMIT`/`ROLLBACK` inside | no |
+| Invocation | explicit | explicit | implicit, by DML |
+| Typical use | reusable calculation | multi-step batch job | audit, derived column, enforcement |
+
+PostgreSQL gained true `PROCEDURE` support with transaction control in version 11; before that
+everything was a function.
+
+**Triggers are powerful and easy to misuse.** They are the right tool for audit trails and
+enforcing invariants that must hold regardless of which code path writes. They are the wrong
+tool when:
+
+- Business logic hides in them - debugging becomes archaeology, since nothing in the application
+  code shows the effect.
+- They cascade: trigger A writes a table with trigger B, which writes back. Recursion and
+  surprise performance cliffs.
+- They do heavy work per row on bulk loads - a `COPY` of a million rows fires a million times.
+- They perform external side effects such as notifications; a rollback cannot un-send an email.
+
+`FOR EACH STATEMENT` triggers avoid the per-row cost when you only need one action per DML.
+
+### Example
+
+An audit trigger recording every status change, and a function computing an order total.
+
+### Code Example
+
+```sql
+-- ============ FUNCTION: reusable, callable in SELECT ============
+CREATE OR REPLACE FUNCTION order_total(p_order_id INT)
+RETURNS NUMERIC
+LANGUAGE sql
+STABLE                                  -- no writes; planner can optimise
+AS $$
+    SELECT COALESCE(SUM(quantity * unit_price), 0)
+    FROM   order_items WHERE order_id = p_order_id;
+$$;
+
+SELECT order_id, order_total(order_id) AS total FROM orders ORDER BY order_id LIMIT 3;
+
+-- ============ PROCEDURE: multi-step, owns its transactions ============
+CREATE OR REPLACE PROCEDURE cancel_stale_orders(p_days INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_count INT;
+BEGIN
+    UPDATE orders
+    SET    status = 'CANCELLED'
+    WHERE  status = 'PENDING'
+      AND  order_date < CURRENT_DATE - p_days;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    RAISE NOTICE 'cancelled % stale orders', v_count;
+    COMMIT;                             -- legal in a procedure, not in a function
+END; $$;
+
+CALL cancel_stale_orders(60);
+
+-- ============ TRIGGER: audit trail, the legitimate use case ============
+CREATE TABLE order_status_audit (
+    audit_id   BIGSERIAL PRIMARY KEY,
+    order_id   INT NOT NULL,
+    old_status VARCHAR(20),
+    new_status VARCHAR(20),
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    changed_by TEXT NOT NULL DEFAULT CURRENT_USER
+);
+
+CREATE OR REPLACE FUNCTION audit_order_status() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- only log real changes; IS DISTINCT FROM is NULL-safe
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        INSERT INTO order_status_audit (order_id, old_status, new_status)
+        VALUES (OLD.order_id, OLD.status, NEW.status);
+    END IF;
+    RETURN NEW;
+END; $$;
+
+CREATE TRIGGER trg_audit_order_status
+AFTER UPDATE OF status ON orders          -- column-specific: fires less often
+FOR EACH ROW EXECUTE FUNCTION audit_order_status();
+
+UPDATE orders SET status = 'SHIPPED' WHERE order_id = 5;
+SELECT order_id, old_status, new_status FROM order_status_audit;
+```
+
+### Output
+
+```
+ order_id |   total
+----------+-----------
+        1 |  99997.00
+        2 |   7497.00
+        3 |  10498.00
+
+NOTICE:  cancelled 1 stale orders
+CALL
+
+UPDATE 1
+ order_id | old_status | new_status
+----------+------------+------------
+        5 | PENDING    | SHIPPED
+```
+
+### Why Interviewers Ask This
+
+It probes where you believe business logic belongs. Both extremes are wrong answers: "everything
+in the database" and "never use a trigger". The mature answer distinguishes invariants and audit
+(database) from workflow (application).
+
+### Common Mistakes
+
+- Trying to `COMMIT` inside a function.
+- Using `FOR EACH ROW` where `FOR EACH STATEMENT` suffices, then wondering why bulk inserts
+  crawl.
+- Returning `NULL` from a `BEFORE` trigger by accident, silently cancelling the write.
+- Sending emails or calling HTTP from a trigger, which cannot be rolled back.
+- Not marking pure functions `IMMUTABLE`/`STABLE`, blocking optimisation and expression indexes.
+
+### Best Practices
+
+- Triggers for audit trails and invariants; application code for business workflow.
+- Keep trigger bodies short and side-effect-free; enqueue work instead of doing it inline.
+- Use `AFTER UPDATE OF column` to narrow firing conditions.
+- Mark function volatility correctly and always `SET search_path` in `SECURITY DEFINER`
+  functions.
+- Document every trigger in the schema README - they are invisible at the call site.
+
+### Follow-up Questions
+
+1. `BEFORE` versus `AFTER` triggers - which can modify `NEW`?
+2. What are `IMMUTABLE`, `STABLE` and `VOLATILE` and what do they enable?
+3. How do you prevent infinite trigger recursion?
+4. When would you use `LISTEN`/`NOTIFY` instead of a trigger side effect?
+5. Security risk of `SECURITY DEFINER` without a fixed `search_path`?
+
+### Real-world Scenario
+
+An order table had a trigger that recalculated a customer summary row on every insert. A
+marketing backfill inserted 3 million historical orders; the trigger fired 3 million times, each
+one locking the same summary row, and the import ran for nine hours before being killed. The fix
+was a statement-level trigger plus a nightly recompute, dropping the import to four minutes.
+
+---
+
+## Question 30
+
+**Difficulty:** Medium
+**Category:** SQL -> GROUP BY advanced
+
+### Question
+
+What are `GROUPING SETS`, `ROLLUP` and `CUBE`? How do you tell a subtotal row from a real `NULL`?
+
+### Answer
+
+These produce multiple levels of aggregation in **one pass** instead of `UNION ALL`-ing several
+queries.
+
+- **`GROUPING SETS ((a,b),(a),())`** - explicitly list the groupings you want.
+- **`ROLLUP(a, b)`** - hierarchical subtotals: `(a,b)`, `(a)`, `()`. Use for
+  year -> month -> day or country -> city.
+- **`CUBE(a, b)`** - every combination: `(a,b)`, `(a)`, `(b)`, `()`. 2^n groupings.
+
+Subtotal rows carry `NULL` in the columns not being grouped, which is ambiguous when the data
+itself contains `NULL`s. The **`GROUPING(col)`** function disambiguates: it returns 1 when the
+column was aggregated away in that row, 0 when it is a real value. Combine it with `CASE` to
+produce readable labels.
+
+### Example
+
+Revenue by country and city with automatic city subtotals and a grand total. Sara Khan's `NULL`
+city is exactly the ambiguity this feature creates.
+
+### Code Example
+
+```sql
+SELECT COALESCE(c.country, '(all countries)')                    AS country,
+       CASE WHEN GROUPING(c.city) = 1 THEN '(all cities)'
+            ELSE COALESCE(c.city, '(unknown city)')              -- real NULL, distinguished
+       END                                                       AS city,
+       COUNT(DISTINCT o.order_id)                                AS orders,
+       COALESCE(SUM(oi.quantity * oi.unit_price), 0)             AS revenue,
+       GROUPING(c.country) AS g_country,
+       GROUPING(c.city)    AS g_city
+FROM       customers   c
+LEFT  JOIN orders      o  ON o.customer_id = c.customer_id AND o.status <> 'CANCELLED'
+LEFT  JOIN order_items oi ON oi.order_id   = o.order_id
+GROUP BY   ROLLUP (c.country, c.city)
+ORDER BY   g_country, country, g_city, city;
+
+-- CUBE: also gives per-city totals across all countries
+-- GROUP BY CUBE (c.country, c.city)
+
+-- Equivalent to ROLLUP but explicit
+-- GROUP BY GROUPING SETS ((c.country, c.city), (c.country), ())
+```
+
+### Output
+
+```
+    country      |     city      | orders |  revenue  | g_country | g_city
+-----------------+---------------+--------+-----------+-----------+--------
+ India           | Bengaluru     |      3 | 197493.00 |         0 |      0
+ India           | Chennai       |      1 |   4999.00 |         0 |      0
+ India           | Delhi         |      0 |      0.00 |         0 |      0
+ India           | Mumbai        |      2 |  13997.00 |         0 |      0
+ India           | (all cities)  |      6 | 216489.00 |         0 |      1
+ UAE             | (unknown city)|      0 |      0.00 |         0 |      0
+ UAE             | (all cities)  |      0 |      0.00 |         0 |      1
+ USA             | Austin        |      1 |  16497.00 |         0 |      0
+ USA             | (all cities)  |      1 |  16497.00 |         0 |      1
+ (all countries) | (all cities)  |      7 | 232986.00 |         1 |      1
+(10 rows)
+```
+
+The UAE rows show why `GROUPING` matters: `(unknown city)` is Sara's genuine `NULL`, while
+`(all cities)` is the subtotal. Without `GROUPING` both would print as `NULL` and be
+indistinguishable.
+
+### Why Interviewers Ask This
+
+It is a reporting-heavy question that separates candidates who would `UNION ALL` three queries
+from those who know the single-pass feature. The `GROUPING` disambiguation is the detail that
+shows real usage.
+
+### Common Mistakes
+
+- Using `UNION ALL` of three aggregate queries, scanning the table three times.
+- Assuming a `NULL` in the output is always a subtotal marker.
+- Expecting `CUBE` to be cheap - it computes 2^n groupings.
+- Sorting without accounting for subtotal rows, so totals land in the middle of the report.
+
+### Best Practices
+
+- `ROLLUP` for hierarchies, `GROUPING SETS` when you need specific combinations only, `CUBE`
+  rarely and on low-cardinality columns.
+- Always label subtotals with `GROUPING(...)` rather than exposing raw `NULL`s.
+- Order by the `GROUPING` flags so totals appear last.
+
+### Follow-up Questions
+
+1. How many grouping sets does `CUBE(a, b, c)` produce? (Eight.)
+2. What does `GROUPING_ID` give you over `GROUPING`?
+3. How would you achieve the same with window functions instead?
+4. Which is cheaper for one subtotal level: `ROLLUP` or a window `SUM OVER ()`?
+
+### Real-world Scenario
+
+A finance export ran four separate aggregate queries - by region, by country, by city, and a
+grand total - then stitched them in Python. Each scanned a 90-million-row fact table. A single
+`ROLLUP` query replaced all four, cut the export from 11 minutes to 90 seconds, and removed the
+class of bug where the four scans saw slightly different data.
+
+---
+
+## Revision Notes: SQL Questions 21-30
+
+| Topic | One-line takeaway |
+| --- | --- |
+| Keys | super key (any unique set) -> candidate (minimal) -> primary (chosen one) |
+| `UNION` vs `UNION ALL` | `ALL` is the default choice; `UNION` pays for a dedupe sort |
+| Pagination | `OFFSET` is O(m+n) and unstable; keyset is O(log n) and stable |
+| Views | a view is a macro, not a cache; materialised views store rows and go stale |
+| Deadlocks | caused by inconsistent lock order; fix by ordering, then retry on 40P01 |
+| Normalisation | 1NF atomic, 2NF no partial, 3NF no transitive, BCNF every determinant a key |
+| `EXPLAIN` | compare estimated vs actual rows first; that gap is usually the root cause |
+| Partitioning | one server, prune by key; sharding is many servers, much more expensive |
+| Triggers | audit and invariants yes, business workflow no, per-row on bulk loads never |
+| `ROLLUP` | one pass for subtotals; use `GROUPING()` to label them |
+
+**Sargable predicates** - keep the column bare on the left:
+
+```
+BAD : WHERE EXTRACT(YEAR FROM order_date) = 2025
+GOOD: WHERE order_date >= '2025-01-01' AND order_date < '2026-01-01'
+BAD : WHERE UPPER(email) = 'A@B.COM'
+GOOD: WHERE email = 'a@b.com'          -- with a LOWER() expression index if needed
+```
+
+---
+
+
+# SECTION 2: MERN STACK
+
+Numbering restarts per section. These are **MERN Q1** onward.
+
+## MERN Q1
+
+**Difficulty:** Easy
+**Category:** MongoDB -> Fundamentals
+
+### Question
+
+How does MongoDB's document model differ from a relational model? When would you choose each?
+
+### Answer
+
+MongoDB stores **BSON documents** in collections. There is no enforced schema by default, arrays
+and nested objects are first-class, and related data is often **embedded** rather than joined.
+
+| | Relational | MongoDB |
+| --- | --- | --- |
+| Unit | row in a table | document in a collection |
+| Schema | enforced by DDL | flexible; optional JSON Schema validation |
+| Relationships | foreign keys + joins | embedding, or references + `$lookup` |
+| Transactions | ACID, always multi-row | ACID, multi-document since 4.0 (replica set required) |
+| Scaling | vertical, then read replicas | horizontal sharding built in |
+| Best at | complex joins, strong constraints | hierarchical documents, high write throughput, evolving shape |
+
+The real decision rule is **access pattern**, not preference. Embed when data is read together
+and bounded in size ("one product's reviews on the product page"). Reference when data is shared,
+unbounded, or updated independently ("users referenced by orders").
+
+The 16 MB document limit is a hard design constraint: any array that grows without bound - audit
+logs, chat messages, follower lists - must be its own collection.
+
+### Example
+
+An e-commerce order: line items are embedded (always read with the order, bounded), while the
+customer is referenced (shared across many orders, updated independently).
+
+### Code Example
+
+```javascript
+// Embedded line items + referenced customer: the shape most order systems land on
+const order = {
+  _id: ObjectId("665f1a2b3c4d5e6f7a8b9c01"),
+  customerId: ObjectId("665f1a2b3c4d5e6f7a8b9c99"),  // reference: shared entity
+  orderDate: new Date("2025-04-02"),
+  status: "DELIVERED",
+  items: [                                            // embedded: read together, bounded
+    { productId: ObjectId("...01"), name: "UltraBook 14", qty: 1, unitPrice: 89999 },
+    { productId: ObjectId("...03"), name: "Mechanical Keyboard", qty: 2, unitPrice: 4999 }
+  ],
+  total: 99997,                                       // denormalised for list views
+  shipping: { city: "Bengaluru", country: "India" }   // embedded sub-document
+};
+
+// Schema validation: flexibility does not have to mean chaos
+db.createCollection("orders", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["customerId", "orderDate", "status", "items"],
+      properties: {
+        status: { enum: ["PENDING", "SHIPPED", "DELIVERED", "CANCELLED"] },
+        total:  { bsonType: ["double", "int", "long"], minimum: 0 },
+        items:  {
+          bsonType: "array",
+          minItems: 1,
+          items: {
+            bsonType: "object",
+            required: ["productId", "qty", "unitPrice"],
+            properties: { qty: { bsonType: "int", minimum: 1 } }
+          }
+        }
+      }
+    }
+  },
+  validationLevel: "strict",
+  validationAction: "error"
+});
+```
+
+### Output
+
+```
+// One query returns the whole order - no joins needed
+db.orders.findOne({ _id: ObjectId("665f1a2b3c4d5e6f7a8b9c01") })
+{ _id: ..., status: 'DELIVERED', items: [ {...}, {...} ], total: 99997 }
+
+// Validation rejects a bad write instead of silently accepting it
+db.orders.insertOne({ customerId: ObjectId("...99"), orderDate: new Date(),
+                      status: "SHIPPING", items: [] })
+MongoServerError: Document failed validation
+```
+
+### Why Interviewers Ask This
+
+They want to know whether you design for access patterns or just translate tables into
+collections. "Embed what you read together" is the phrase they are listening for.
+
+### Common Mistakes
+
+- Saying MongoDB "has no schema" - it has no *enforced* schema by default, but every application
+  has an implicit one, and `$jsonSchema` can enforce it.
+- Claiming MongoDB cannot do transactions or joins. Both exist (`$lookup`, multi-document ACID).
+- Embedding unbounded arrays and hitting the 16 MB ceiling in production.
+- Normalising fully, then needing five `$lookup` stages per request.
+
+### Best Practices
+
+- Model from the queries backwards: list the screens, then design documents to be served in one
+  read.
+- Embed bounded, co-read data; reference shared or unbounded data.
+- Add `$jsonSchema` validation and a migration strategy even though it is optional.
+- Use the extended reference pattern - duplicate the two or three fields you display and keep the
+  reference for the rest.
+
+### Follow-up Questions
+
+1. What is the 16 MB limit and how do you design around it?
+2. Explain the bucket pattern for time-series data.
+3. When is `$lookup` acceptable and when is it a modelling smell?
+4. How do you keep denormalised fields such as `total` consistent?
+
+### Real-world Scenario
+
+A chat product embedded messages inside the conversation document. Popular group chats crossed
+16 MB in six months, and every write rewrote the entire document, so p99 latency climbed to two
+seconds. Moving messages to their own collection keyed by `conversationId` with the bucket
+pattern fixed both the ceiling and the write amplification.
+
+---
+
+## MERN Q2
+
+**Difficulty:** Medium
+**Category:** MongoDB -> Aggregation pipeline
+
+### Question
+
+Explain the MongoDB aggregation pipeline. Write a pipeline computing revenue per customer.
+
+### Answer
+
+The aggregation pipeline is an ordered array of **stages**; each stage transforms the document
+stream and passes it on - conceptually Unix pipes for documents.
+
+Stages you must know:
+
+| Stage | Purpose | SQL analogue |
+| --- | --- | --- |
+| `$match` | filter documents | `WHERE` |
+| `$project` / `$addFields` | reshape, compute | `SELECT` expressions |
+| `$unwind` | one output document per array element | lateral join / unnest |
+| `$group` | aggregate by key | `GROUP BY` |
+| `$sort`, `$limit`, `$skip` | order and slice | `ORDER BY`, `LIMIT` |
+| `$lookup` | join another collection | `LEFT JOIN` |
+| `$facet` | multiple pipelines over one input | several queries in one |
+
+The single most important optimisation rule: **`$match` and `$sort` as early as possible**, so
+they can use indexes and reduce the document count before expensive stages. Once a pipeline has
+passed `$group` or `$unwind`, indexes no longer apply.
+
+Stages spill to disk beyond 100 MB unless you pass `allowDiskUse: true`.
+
+### Example
+
+Revenue per customer from embedded line items, top spenders first.
+
+### Code Example
+
+```javascript
+db.orders.aggregate([
+  // 1. filter FIRST so the index on { status: 1, orderDate: -1 } is used
+  { $match: { status: { $ne: "CANCELLED" },
+              orderDate: { $gte: new Date("2025-01-01") } } },
+
+  // 2. compute the order total from the embedded array without unwinding
+  { $addFields: {
+      orderTotal: {
+        $sum: { $map: { input: "$items", as: "i",
+                        in: { $multiply: ["$$i.qty", "$$i.unitPrice"] } } }
+      }
+  }},
+
+  // 3. aggregate per customer
+  { $group: {
+      _id: "$customerId",
+      orders:       { $sum: 1 },
+      revenue:      { $sum: "$orderTotal" },
+      avgOrder:     { $avg: "$orderTotal" },
+      lastOrder:    { $max: "$orderDate" },
+      statuses:     { $addToSet: "$status" }
+  }},
+
+  // 4. join customer details AFTER reducing to one doc per customer
+  { $lookup: { from: "customers", localField: "_id",
+               foreignField: "_id", as: "customer" } },
+  { $unwind: { path: "$customer", preserveNullAndEmptyArrays: true } },
+
+  // 5. final shape
+  { $project: {
+      _id: 0,
+      customer: "$customer.fullName",
+      country:  "$customer.country",
+      orders: 1,
+      revenue: 1,
+      avgOrder: { $round: ["$avgOrder", 2] },
+      lastOrder: { $dateToString: { format: "%Y-%m-%d", date: "$lastOrder" } },
+      segment: { $switch: { branches: [
+                    { case: { $gte: ["$revenue", 100000] }, then: "VIP" },
+                    { case: { $gte: ["$revenue", 10000]  }, then: "regular" }
+                  ], default: "occasional" } }
+  }},
+  { $sort: { revenue: -1 } },
+  { $limit: 10 }
+], { allowDiskUse: true });
+```
+
+### Output
+
+```
+[
+  { customer: 'Aarav Sharma', country: 'India', orders: 3, revenue: 197493,
+    avgOrder: 65831, lastOrder: '2025-04-02', segment: 'VIP' },
+  { customer: 'John Carter',  country: 'USA',   orders: 1, revenue: 16497,
+    avgOrder: 16497, lastOrder: '2025-04-18', segment: 'regular' },
+  { customer: 'Diya Patel',   country: 'India', orders: 2, revenue: 13997,
+    avgOrder: 6998.5, lastOrder: '2025-05-09', segment: 'regular' },
+  { customer: 'Meera Iyer',   country: 'India', orders: 1, revenue: 4999,
+    avgOrder: 4999, lastOrder: '2025-03-15', segment: 'occasional' }
+]
+```
+
+### Why Interviewers Ask This
+
+Aggregation is the differentiator between "I can do CRUD" and "I can build features". Stage
+ordering is a direct performance question with a verifiable answer.
+
+### Common Mistakes
+
+- Putting `$match` after `$group` or `$unwind`, losing all index use.
+- `$unwind`-ing a large array when `$map` plus `$sum` would compute the same value in place.
+- `$lookup` before reducing the document count, so the join runs per raw document.
+- Forgetting `preserveNullAndEmptyArrays` on `$unwind` after `$lookup`, silently dropping
+  documents with no match - the MongoDB equivalent of turning a `LEFT JOIN` into an `INNER JOIN`.
+- Ignoring the 100 MB stage limit on big pipelines.
+
+### Best Practices
+
+- `$match` first, `$sort` next, `$project` away unused fields early to shrink documents.
+- Verify with `db.coll.explain("executionStats").aggregate([...])` and look for `IXSCAN`.
+- Prefer `$addFields` with array operators over `$unwind` + `$group` round trips.
+- Use `$facet` when a page needs results plus a count in one round trip.
+
+### Follow-up Questions
+
+1. Why does `$match` after `$group` lose index usage?
+2. When is `$unwind` unavoidable?
+3. What does `$facet` solve for a paginated search page?
+4. Compare `$lookup` with storing an extended reference.
+5. What changes when the collection is sharded?
+
+### Real-world Scenario
+
+A merchant analytics endpoint took 14 seconds. The pipeline `$unwind`-ed 2.1 million line items
+before filtering by date. Moving `$match` to stage one and replacing `$unwind` + `$group` with
+`$map` + `$sum` brought it to 220 ms with no schema change.
+
+---
+
+## MERN Q3
+
+**Difficulty:** Medium
+**Category:** MongoDB -> Indexes
+
+### Question
+
+How do MongoDB indexes work? Explain the ESR rule for compound indexes.
+
+### Answer
+
+MongoDB uses B-tree indexes much like relational engines. Every collection has an index on `_id`.
+Types: single-field, **compound**, multikey (automatic on array fields), text, geospatial,
+hashed, wildcard, plus **partial** and **TTL** variants.
+
+**ESR rule** - order compound index keys as **Equality, Sort, Range**:
+
+```
+{ status: 1,        // E - equality match
+  orderDate: -1,    // S - sort field
+  total: 1 }        // R - range filter
+```
+
+Reason: equality narrows to a contiguous region, the sort field then already has the right order
+(no in-memory sort), and range scanning last still reads a contiguous span. Putting the range
+before the sort forces a blocking sort.
+
+Like SQL composite indexes, MongoDB obeys the **prefix rule**: `{a:1, b:1, c:1}` serves queries on
+`a`, `a+b`, `a+b+c`, but not `b` alone.
+
+A **covered query** is answered from the index alone - requires that all returned fields are in
+the index and `_id` is excluded from the projection.
+
+### Example
+
+Order history screen: filter by status, sort newest first, optional minimum total.
+
+### Code Example
+
+```javascript
+// ESR-ordered compound index
+db.orders.createIndex({ status: 1, orderDate: -1, total: 1 },
+                      { name: "status_date_total" });
+
+// Uses the index fully: equality + sort + range
+db.orders.find({ status: "DELIVERED", total: { $gte: 10000 } })
+         .sort({ orderDate: -1 }).limit(20);
+
+// Partial index: index only the small hot subset
+db.orders.createIndex(
+  { orderDate: -1 },
+  { partialFilterExpression: { status: { $in: ["PENDING", "SHIPPED"] } },
+    name: "open_orders_date" }
+);
+
+// Unique index (the equivalent of a UNIQUE constraint)
+db.customers.createIndex({ email: 1 }, { unique: true });
+
+// TTL index: documents auto-expire - sessions, OTPs, caches
+db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+
+// Multikey: automatic when the field is an array
+db.orders.createIndex({ "items.productId": 1 });
+
+// Covered query: everything from the index, _id excluded
+db.orders.createIndex({ customerId: 1, orderDate: -1, status: 1 });
+db.orders.find({ customerId: ObjectId("...99") },
+                { _id: 0, orderDate: 1, status: 1 }).sort({ orderDate: -1 });
+
+// Diagnose
+db.orders.find({ status: "DELIVERED" }).sort({ orderDate: -1 })
+         .explain("executionStats");
+
+// Find unused indexes before deleting them
+db.orders.aggregate([{ $indexStats: {} }]);
+```
+
+### Output
+
+```
+// good plan
+{ winningPlan: { stage: 'LIMIT',
+    inputStage: { stage: 'IXSCAN', indexName: 'status_date_total',
+                  direction: 'forward' } },
+  executionStats: { nReturned: 20, totalKeysExamined: 20,
+                    totalDocsExamined: 20, executionTimeMillis: 1 } }
+
+// covered query - note totalDocsExamined is 0
+{ executionStats: { nReturned: 3, totalKeysExamined: 3, totalDocsExamined: 0 } }
+
+// bad plan: no usable index
+{ winningPlan: { stage: 'SORT',            // blocking in-memory sort
+    inputStage: { stage: 'COLLSCAN' } },
+  executionStats: { nReturned: 20, totalDocsExamined: 480000,
+                    executionTimeMillis: 1120 } }
+```
+
+The tell-tale ratio is `totalDocsExamined` versus `nReturned`. Close to 1:1 is healthy;
+480000:20 means a collection scan.
+
+### Why Interviewers Ask This
+
+Indexing is the top MongoDB performance topic, and ESR is a concrete, memorable rule that
+candidates either know or do not.
+
+### Common Mistakes
+
+- Creating one single-field index per query field instead of one well-ordered compound index.
+- Ignoring sort direction: `{a:1, b:-1}` does not serve `sort({a:1, b:1})` efficiently.
+- Assuming an index on an array field behaves like a scalar index (multikey has restrictions -
+  you cannot have a compound index on two array fields).
+- Believing indexes are free; each one taxes every write and consumes RAM in the working set.
+- Not checking `$indexStats` before adding yet another index.
+
+### Best Practices
+
+- Order compound keys by ESR and verify with `explain("executionStats")`.
+- Watch `totalDocsExamined / nReturned`; investigate anything far above 1.
+- Use partial indexes for skewed predicates and TTL indexes for ephemeral data.
+- Build indexes in the background on production, ideally during low traffic.
+- Keep the total index size within RAM where possible.
+
+### Follow-up Questions
+
+1. Why does the sort field come before the range field?
+2. What is a covered query and why must `_id` be excluded?
+3. Restrictions on multikey compound indexes?
+4. How do TTL indexes actually delete documents, and how promptly?
+5. What is a wildcard index good and bad at?
+
+### Real-world Scenario
+
+A support dashboard filtered by status and sorted by date over 40 million orders. It had separate
+single-field indexes on both, so MongoDB used one and did a blocking in-memory sort of 300,000
+documents, occasionally hitting the 32 MB sort limit and erroring. One ESR-ordered compound index
+made the query index-only and removed the errors.
+
+---
+
+## MERN Q4
+
+**Difficulty:** Hard
+**Category:** MongoDB -> Replica sets, transactions
+
+### Question
+
+Explain replica sets, write concern and read preference. When do you need multi-document
+transactions?
+
+### Answer
+
+A **replica set** is a group of mongod nodes holding the same data: one **primary** accepting
+writes, several **secondaries** replicating the oplog. If the primary fails, the members hold an
+election (Raft-like) and a secondary is promoted, typically within 10 to 12 seconds.
+
+**Write concern** `w` controls how many nodes must acknowledge a write:
+
+| Setting | Meaning | Risk |
+| --- | --- | --- |
+| `w: 0` | fire and forget | data loss, no error reporting |
+| `w: 1` | primary only | lost on primary failure before replication |
+| `w: "majority"` | majority of voting members | durable across failover - the default since 5.0 |
+| `j: true` | flushed to the journal on disk | survives process crash |
+
+**Read preference** controls which node serves reads: `primary` (default, strongly consistent),
+`primaryPreferred`, `secondary`, `secondaryPreferred`, `nearest`. Reading from secondaries scales
+reads but gives you **eventual consistency** - replication lag means you can read stale data,
+including your own write.
+
+**Multi-document transactions** (4.0 replica sets, 4.2 sharded clusters) give ACID across
+documents and collections. Single-document writes are already atomic, so a transaction is only
+needed when two or more documents must change together and you cannot restructure to embed them.
+They cost more than single writes and hold locks, so prefer schema design that avoids them.
+
+### Example
+
+Transferring stock between a product document and an order document must be all-or-nothing.
+
+### Code Example
+
+```javascript
+// ---- write concern and read preference on a connection ----
+const client = new MongoClient(uri, {
+  writeConcern: { w: "majority", j: true, wtimeoutMS: 5000 },
+  readPreference: "primaryPreferred",
+  readConcern: { level: "majority" }        // do not read rolled-back data
+});
+
+// ---- multi-document transaction with correct retry semantics ----
+async function placeOrder(client, customerId, productId, qty, price) {
+  const session = client.startSession();
+  try {
+    let orderId;
+    // withTransaction retries on TransientTransactionError automatically
+    await session.withTransaction(async () => {
+      const db = client.db("shop");
+
+      // 1. conditional decrement: the filter IS the concurrency guard
+      const upd = await db.collection("products").updateOne(
+        { _id: productId, stockQty: { $gte: qty } },
+        { $inc: { stockQty: -qty } },
+        { session }
+      );
+      if (upd.modifiedCount === 0) throw new Error("OUT_OF_STOCK"); // aborts the txn
+
+      // 2. create the order in the same transaction
+      const res = await db.collection("orders").insertOne({
+        customerId, orderDate: new Date(), status: "PENDING",
+        items: [{ productId, qty, unitPrice: price }],
+        total: qty * price
+      }, { session });
+      orderId = res.insertedId;
+
+      // 3. ledger entry
+      await db.collection("inventory_log").insertOne({
+        productId, delta: -qty, reason: "ORDER", orderId, at: new Date()
+      }, { session });
+    }, {
+      readConcern:  { level: "snapshot" },
+      writeConcern: { w: "majority" },
+      maxCommitTimeMS: 5000
+    });
+    return orderId;
+  } finally {
+    await session.endSession();     // always release the session
+  }
+}
+
+// ---- read your own write without a transaction: causal consistency ----
+const session = client.startSession({ causalConsistency: true });
+await coll.insertOne({ _id: 1, v: "a" }, { session });
+await coll.findOne({ _id: 1 }, { session, readPreference: "secondary" }); // sees the write
+
+// ---- check replication lag before trusting secondary reads ----
+db.adminCommand({ replSetGetStatus: 1 }).members.forEach(m =>
+  print(`${m.name} ${m.stateStr} lag=${m.optimeDate}`));
+```
+
+### Output
+
+```
+// success
+new ObjectId("665f...c07")
+
+// out of stock: transaction aborted, nothing written
+Error: OUT_OF_STOCK
+db.orders.countDocuments({ customerId })      // unchanged
+db.products.findOne({ _id: productId }).stockQty  // unchanged
+
+// replica set status
+mongo-0:27017 PRIMARY   lag=2025-04-02T13:20:01Z
+mongo-1:27017 SECONDARY lag=2025-04-02T13:20:01Z
+mongo-2:27017 SECONDARY lag=2025-04-02T13:19:58Z    // 3s behind
+```
+
+### Why Interviewers Ask This
+
+This is the MongoDB distributed-systems question. It tests whether you understand the durability
+and consistency knobs rather than accepting defaults, and whether you know that transactions are
+a last resort in a document database, not the primary tool.
+
+### Common Mistakes
+
+- Saying MongoDB is not ACID. It is, per document always, and across documents since 4.0.
+- Using `w: 1` for financial writes, then losing acknowledged data on failover.
+- Reading from secondaries and being surprised by stale data - then "fixing" it with retries
+  instead of causal consistency or `primary` reads.
+- Wrapping every operation in a transaction, hurting throughput for no benefit.
+- Not handling `TransientTransactionError`; `withTransaction` does it for you, manual code does
+  not.
+- Leaking sessions by skipping `endSession`.
+
+### Best Practices
+
+- `w: "majority"` plus `readConcern: "majority"` for anything you cannot lose.
+- Prefer single-document atomicity by embedding what must change together.
+- Keep transactions under a second and touching few documents; default limit is 60 seconds.
+- Use `causalConsistency` sessions for read-your-own-write on secondary reads.
+- Monitor replication lag and alert on it, since it silently changes read semantics.
+
+### Follow-up Questions
+
+1. How does the oplog work, and what happens when a secondary falls off the end of it?
+2. What is a rollback and how does `readConcern: majority` protect you?
+3. Why is an arbiter usually a bad idea for a three-node set?
+4. How do transactions behave on a sharded cluster differently?
+5. What is the difference between `readConcern` and `readPreference`?
+
+### Real-world Scenario
+
+A payments service wrote with the default `w: 1` on an older driver. During a routine primary
+failover, roughly 40 acknowledged payment records that had not yet replicated were lost, while
+the payment gateway had already charged the cards. Switching to `w: "majority", j: true` plus a
+daily reconciliation against gateway settlements closed the gap.
+
+---
+
+## MERN Q5
+
+**Difficulty:** Easy
+**Category:** Express -> Middleware
+
+### Question
+
+What is middleware in Express? Explain the execution order and the role of `next()`.
+
+### Answer
+
+Middleware is a function `(req, res, next)` that sits in an ordered chain. Each one can read and
+mutate `req`/`res`, end the response, or call `next()` to pass control on. Express matches
+middleware **top to bottom in registration order** - order is behaviour, not style.
+
+Four kinds:
+
+1. **Application-level** - `app.use(fn)`, runs for every request.
+2. **Router-level** - `router.use(fn)`, scoped to a mount path.
+3. **Route-level** - `app.get(path, mw1, mw2, handler)`.
+4. **Error-handling** - four arguments `(err, req, res, next)`. Express identifies it by arity, so
+   you must declare all four parameters even if you ignore `next`.
+
+Rules that matter:
+
+- Failing to call `next()` and not responding leaves the request hanging until timeout.
+- Calling `next(err)` skips all remaining normal middleware and jumps to the error handler.
+- Error handlers must be registered **last**, after all routes.
+- In Express 4, a thrown error inside an `async` handler is **not** caught automatically - you
+  must wrap it. Express 5 forwards rejected promises to the error handler.
+
+### Example
+
+A request pipeline: request id, logging, body parsing, authentication, the route, then the 404
+and error handlers.
+
+### Code Example
+
+```javascript
+import express from "express";
+import { randomUUID } from "node:crypto";
+
+const app = express();
+
+// 1. correlation id - first, so everything downstream can log it
+app.use((req, res, next) => {
+  req.id = req.get("x-request-id") ?? randomUUID();
+  res.setHeader("x-request-id", req.id);
+  next();
+});
+
+// 2. structured request logging with duration measured on finish
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on("finish", () => {
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    console.log(JSON.stringify({
+      id: req.id, method: req.method, path: req.originalUrl,
+      status: res.statusCode, ms: +ms.toFixed(1)
+    }));
+  });
+  next();                       // must call next, or the request stalls here
+});
+
+// 3. built-in body parsing, with a size limit to blunt payload attacks
+app.use(express.json({ limit: "100kb" }));
+
+// 4. route-level middleware: auth applies only to this route
+const requireAuth = (req, res, next) => {
+  const token = req.get("authorization")?.replace(/^Bearer /, "");
+  if (!token) return next(Object.assign(new Error("Unauthorized"), { status: 401 }));
+  req.user = { id: "u_1", role: "customer" };   // verified elsewhere
+  next();
+};
+
+// async wrapper: Express 4 does not catch rejected promises
+const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get("/orders/:id", requireAuth, wrap(async (req, res) => {
+  const order = await findOrder(req.params.id);
+  if (!order) {
+    const e = new Error("Order not found");
+    e.status = 404;
+    throw e;                    // wrap() forwards this to the error handler
+  }
+  res.json(order);
+}));
+
+// 5. 404 handler: after all routes, before the error handler
+app.use((req, res, next) => {
+  next(Object.assign(new Error(`No route for ${req.method} ${req.originalUrl}`),
+                     { status: 404 }));
+});
+
+// 6. error handler LAST, and it must declare four parameters
+app.use((err, req, res, next) => {
+  const status = err.status ?? 500;
+  if (status >= 500) console.error({ id: req.id, err: err.stack });
+  res.status(status).json({
+    error: { message: status >= 500 ? "Internal server error" : err.message,
+             requestId: req.id }        // never leak stack traces to clients
+  });
+});
+
+app.listen(3000);
+```
+
+### Output
+
+```
+$ curl -s localhost:3000/orders/9 -H "Authorization: Bearer t"
+{"error":{"message":"Order not found","requestId":"6f0c1e8a-..."}}
+
+# server log
+{"id":"6f0c1e8a-...","method":"GET","path":"/orders/9","status":404,"ms":3.4}
+
+$ curl -s localhost:3000/orders/9
+{"error":{"message":"Unauthorized","requestId":"a1b2c3d4-..."}}
+
+$ curl -s localhost:3000/nope
+{"error":{"message":"No route for GET /nope","requestId":"..."}}
+```
+
+### Why Interviewers Ask This
+
+Middleware is the core Express abstraction; nearly every Express question reduces to it. The
+four-argument error handler and the async-error gap are the details that reveal real experience.
+
+### Common Mistakes
+
+- Registering the error handler before the routes, so it never fires.
+- Writing `(err, req, res)` with three parameters - Express treats it as normal middleware.
+- Forgetting `next()`, producing a request that hangs with no error.
+- Calling `next()` *and* sending a response, causing "Cannot set headers after they are sent".
+- Assuming `async` handler rejections reach the error handler in Express 4.
+- Leaking `err.stack` to the client in production.
+
+### Best Practices
+
+- Fixed order: correlation id, logging, security headers, body parsing, routes, 404, error
+  handler.
+- Wrap async handlers or move to Express 5.
+- Set body size limits; never accept unbounded JSON.
+- Attach a request id and include it in both logs and error responses for support.
+- Keep middleware single-purpose and testable in isolation.
+
+### Follow-up Questions
+
+1. How does Express distinguish an error handler from normal middleware?
+2. What happens if two middleware both write to the response?
+3. `app.use` versus `router.use` versus route-level arrays - when each?
+4. How do you make one middleware run only for certain HTTP methods?
+5. What changed for async errors in Express 5?
+
+### Real-world Scenario
+
+An API returned HTTP 200 with an empty body under load. A validation middleware called
+`next(err)` and *also* wrote a response; the error handler then tried to write again and the
+double-write was swallowed. Adding a rule that middleware either responds or calls `next`, never
+both, plus a lint rule, ended a week of intermittent debugging.
+
+---
+
+## MERN Q6
+
+**Difficulty:** Medium
+**Category:** Express -> Authentication, JWT
+
+### Question
+
+How does JWT authentication work? Compare it with sessions and describe secure token storage.
+
+### Answer
+
+A **JWT** is three base64url segments: `header.payload.signature`. The server signs the payload;
+any party with the key can verify it without a database lookup. That statelessness is the entire
+value proposition - and the entire problem, because a valid token cannot be un-issued.
+
+| | Session (server state) | JWT (stateless) |
+| --- | --- | --- |
+| Storage | server store (Redis) + cookie id | client holds the token |
+| Revocation | delete the session - immediate | impossible without a blocklist |
+| Scaling | needs shared store | none needed |
+| Payload visibility | opaque id | readable by anyone (signed, not encrypted) |
+| Size per request | small cookie | larger header |
+
+The standard production pattern is a **pair of tokens**:
+
+- **Access token** - JWT, short lived (5 to 15 minutes), sent on every request.
+- **Refresh token** - long lived, stored server-side so it *can* be revoked, used only to mint
+  new access tokens, and **rotated** on each use so a stolen token is detectable.
+
+Storage: keep the refresh token in an `httpOnly`, `Secure`, `SameSite` cookie so JavaScript
+cannot read it (XSS protection). `localStorage` is readable by any injected script. Cookies need
+CSRF defence: `SameSite=Strict` or `Lax` plus a CSRF token for state-changing requests.
+
+A JWT payload is **signed, not encrypted** - never put secrets in it.
+
+### Example
+
+Login issues both tokens; a middleware verifies the access token; refresh rotates.
+
+### Code Example
+
+```javascript
+import jwt from "jsonwebtoken";
+import argon2 from "argon2";
+import crypto from "node:crypto";
+
+const ACCESS_TTL  = "15m";
+const REFRESH_TTL_MS = 7 * 24 * 3600 * 1000;
+
+// ---------- login ----------
+app.post("/auth/login", wrap(async (req, res) => {
+  const { email, password } = req.body;
+  const user = await db.collection("users").findOne({ email });
+
+  // constant-time-ish: always verify against something to avoid user enumeration
+  const ok = user && await argon2.verify(user.passwordHash, password);
+  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+  const accessToken = jwt.sign(
+    { sub: String(user._id), role: user.role },      // no PII, no secrets
+    process.env.JWT_SECRET,
+    { expiresIn: ACCESS_TTL, issuer: "shop-api", audience: "shop-web" }
+  );
+
+  // opaque refresh token: store only its hash, like a password
+  const refresh = crypto.randomBytes(32).toString("base64url");
+  await db.collection("refresh_tokens").insertOne({
+    userId: user._id,
+    tokenHash: crypto.createHash("sha256").update(refresh).digest("hex"),
+    family: crypto.randomUUID(),                    // rotation family for reuse detection
+    expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
+    createdAt: new Date()
+  });
+
+  res.cookie("rt", refresh, {
+    httpOnly: true, secure: true, sameSite: "strict",
+    path: "/auth/refresh", maxAge: REFRESH_TTL_MS
+  });
+  res.json({ accessToken, expiresIn: 900 });
+}));
+
+// ---------- verify middleware ----------
+export function authenticate(req, res, next) {
+  const token = req.get("authorization")?.replace(/^Bearer /, "");
+  if (!token) return res.status(401).json({ error: "Missing token" });
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET,
+                          { issuer: "shop-api", audience: "shop-web" });
+    next();
+  } catch (e) {
+    // distinguish expiry (client should refresh) from tampering (client should re-login)
+    const code = e.name === "TokenExpiredError" ? "TOKEN_EXPIRED" : "TOKEN_INVALID";
+    res.status(401).json({ error: code });
+  }
+}
+
+// ---------- refresh with rotation and reuse detection ----------
+app.post("/auth/refresh", wrap(async (req, res) => {
+  const presented = req.cookies.rt;
+  if (!presented) return res.status(401).json({ error: "No refresh token" });
+
+  const hash = crypto.createHash("sha256").update(presented).digest("hex");
+  const stored = await db.collection("refresh_tokens").findOneAndDelete({
+    tokenHash: hash, expiresAt: { $gt: new Date() }
+  });
+
+  if (!stored.value) {
+    // token not found: either expired or ALREADY USED -> possible theft
+    return res.status(401).json({ error: "Invalid refresh token" });
+  }
+
+  // rotate: issue a new refresh token in the same family
+  const next = crypto.randomBytes(32).toString("base64url");
+  await db.collection("refresh_tokens").insertOne({
+    userId: stored.value.userId, family: stored.value.family,
+    tokenHash: crypto.createHash("sha256").update(next).digest("hex"),
+    expiresAt: new Date(Date.now() + REFRESH_TTL_MS), createdAt: new Date()
+  });
+  res.cookie("rt", next, { httpOnly: true, secure: true,
+                           sameSite: "strict", path: "/auth/refresh" });
+
+  const accessToken = jwt.sign({ sub: String(stored.value.userId) },
+                               process.env.JWT_SECRET, { expiresIn: ACCESS_TTL });
+  res.json({ accessToken, expiresIn: 900 });
+}));
+
+// ---------- logout: revoke the whole family ----------
+app.post("/auth/logout", authenticate, wrap(async (req, res) => {
+  await db.collection("refresh_tokens").deleteMany({ userId: new ObjectId(req.user.sub) });
+  res.clearCookie("rt", { path: "/auth/refresh" }).status(204).end();
+}));
+```
+
+### Output
+
+```
+$ curl -sX POST localhost:3000/auth/login -H 'content-type: application/json' \
+       -d '{"email":"aarav@example.com","password":"correct-horse"}' -i
+HTTP/1.1 200 OK
+Set-Cookie: rt=8Kd2...; Path=/auth/refresh; HttpOnly; Secure; SameSite=Strict
+{"accessToken":"eyJhbGciOiJIUzI1NiIs...","expiresIn":900}
+
+# expired access token
+{"error":"TOKEN_EXPIRED"}
+
+# replaying an already-used refresh token
+{"error":"Invalid refresh token"}
+```
+
+### Why Interviewers Ask This
+
+Auth is where security mistakes are most expensive. They are checking whether you know JWTs
+cannot be revoked, why `localStorage` is risky, and whether you have implemented refresh
+rotation - the difference between tutorial auth and production auth.
+
+### Common Mistakes
+
+- Long-lived access tokens (days) with no refresh mechanism - a stolen token stays valid.
+- Storing tokens in `localStorage`, so any XSS is a full account takeover.
+- Putting sensitive data in the payload, believing it is encrypted.
+- Accepting the `alg` from the token header, enabling `alg: none` or algorithm-confusion attacks.
+- Storing refresh tokens in plaintext in the database.
+- Hashing passwords with SHA-256 or MD5 instead of Argon2id or bcrypt.
+- No `issuer`/`audience` validation, so a token from another service is accepted.
+
+### Best Practices
+
+- Short access token, rotating refresh token stored hashed, revocable server-side.
+- Refresh token in an `httpOnly`, `Secure`, `SameSite` cookie scoped to the refresh path only.
+- Pin the algorithm explicitly on verify; validate `iss` and `aud`.
+- Detect refresh reuse and revoke the entire token family - that is a theft signal.
+- Argon2id for passwords; rate-limit login; never reveal whether an email exists.
+
+### Follow-up Questions
+
+1. How do you revoke a JWT before it expires?
+2. Why is `httpOnly` insufficient without CSRF protection?
+3. What is refresh token rotation and what attack does it detect?
+4. Symmetric `HS256` versus asymmetric `RS256` - when does each fit?
+5. How would you handle logout across five devices?
+
+### Real-world Scenario
+
+A startup issued 30-day JWTs stored in `localStorage`. A third-party analytics script was
+compromised and exfiltrated tokens from thousands of browsers. Because the tokens were stateless
+and long-lived, the only remedy was rotating the signing secret, which logged out every user and
+broke mobile clients that had no refresh flow. The rebuild used 15-minute access tokens and
+rotating refresh cookies.
+
+---
+
+
+## MERN Q7
+
+**Difficulty:** Medium
+**Category:** React -> Hooks, useState
+
+### Question
+
+Why is React state immutable, and what happens if you mutate it directly?
+
+### Answer
+
+React decides whether to re-render by comparing the **reference** of the previous and next state
+(`Object.is`). Mutating an object or array in place keeps the same reference, so React sees no
+change and skips the render - the UI silently goes stale. Immutability also makes state
+transitions traceable and lets `React.memo`, `useMemo` and `useCallback` compare cheaply.
+
+State updates are also **asynchronous and batched**. Calling `setCount(count + 1)` three times in
+one handler stales on the same `count`; the updater form `setCount(c => c + 1)` reads the latest
+value each time.
+
+### Example
+
+A cart where adding an item with `push` fails to render but the spread form works.
+
+### Code Example
+
+```jsx
+function Cart() {
+  const [items, setItems] = useState([{ id: 1, name: "USB-C Hub", qty: 1 }]);
+  const [count, setCount] = useState(0);
+
+  // WRONG: mutates the existing array, same reference, no re-render
+  const addBroken = () => {
+    items.push({ id: Date.now(), name: "Keyboard", qty: 1 });
+    setItems(items);
+  };
+
+  // RIGHT: new array reference
+  const addFixed = () =>
+    setItems(prev => [...prev, { id: Date.now(), name: "Keyboard", qty: 1 }]);
+
+  // RIGHT: nested update replaces only the changed item
+  const increment = id =>
+    setItems(prev => prev.map(i => i.id === id ? { ...i, qty: i.qty + 1 } : i));
+
+  // WRONG: all three read the same stale `count`, result is 1
+  const bumpBroken = () => { setCount(count + 1); setCount(count + 1); setCount(count + 1); };
+  // RIGHT: updater form queues correctly, result is 3
+  const bumpFixed  = () => { setCount(c => c + 1); setCount(c => c + 1); setCount(c => c + 1); };
+
+  return (
+    <>
+      <button onClick={addFixed}>Add</button>
+      <button onClick={bumpFixed}>+3</button>
+      <span>{count}</span>
+      <ul>{items.map(i => (
+        <li key={i.id}>{i.name} x{i.qty}
+          <button onClick={() => increment(i.id)}>+</button></li>))}</ul>
+    </>
+  );
+}
+```
+
+### Output
+
+```
+addBroken()  -> array now has 2 items in memory, UI still shows 1   (silent bug)
+addFixed()   -> UI shows 2 items
+bumpBroken() -> count = 1   (three calls, one increment)
+bumpFixed()  -> count = 3
+```
+
+### Why Interviewers Ask This
+
+It is the most common source of "my component does not update" bugs, and the stale-closure
+variant is the follow-up that separates memorisation from understanding.
+
+### Common Mistakes
+
+- `push`, `splice`, `sort`, `reverse` or direct property assignment on state.
+- Passing the current value instead of an updater when the next value depends on the previous.
+- Deep-cloning everything with `JSON.parse(JSON.stringify(...))` - slow and drops `Date`,
+  `undefined` and `Map`.
+- Using array index as `key`, which breaks identity when the list reorders.
+
+### Best Practices
+
+- Spread or array methods that return new values: `map`, `filter`, `concat`, `toSorted`.
+- Always use the updater form when deriving from previous state.
+- Reach for `useReducer` once updates involve several interdependent fields.
+- Immer (or Redux Toolkit, which bundles it) for deeply nested state.
+
+### Follow-up Questions
+
+1. What is a stale closure and how does the updater form avoid it?
+2. How does React 18 automatic batching change update counts?
+3. Why does `React.memo` fail when you pass a new object literal as a prop?
+4. When is `useReducer` a better fit than several `useState` calls?
+
+### Real-world Scenario
+
+A form wizard mutated a nested `formData` object at each step. Steps 1 and 2 rendered because
+other state changed alongside, masking the bug; step 3 changed nothing else and the summary
+screen showed empty fields. Adopting Immer via Redux Toolkit removed the whole class of error.
+
+---
+
+## MERN Q8
+
+**Difficulty:** Medium
+**Category:** React -> useEffect
+
+### Question
+
+Explain `useEffect`, its dependency array, and cleanup. How do you fetch data without a race
+condition?
+
+### Answer
+
+`useEffect(fn, deps)` runs a side effect **after** render and commit. The dependency array
+controls re-execution:
+
+| deps | Runs |
+| --- | --- |
+| omitted | after every render |
+| `[]` | once after mount (twice in dev Strict Mode) |
+| `[a, b]` | on mount and whenever `a` or `b` change by `Object.is` |
+
+The returned function is **cleanup**: it runs before the next effect execution and on unmount.
+That is where you abort requests, clear timers and close sockets.
+
+Data fetching has two hazards. First, **race conditions**: two in-flight requests can resolve out
+of order, so a stale response overwrites a fresh one. Second, **leaks**: setting state after
+unmount. Both are solved with `AbortController` plus an `ignore` flag in cleanup.
+
+React 18 Strict Mode intentionally mounts, unmounts and remounts effects in development to expose
+missing cleanup. That is a feature, not a bug.
+
+### Example
+
+A search box that fetches on every keystroke, where responses arrive out of order.
+
+### Code Example
+
+```jsx
+function OrderSearch({ query }) {
+  const [orders, setOrders] = useState([]);
+  const [state, setState] = useState("idle");
+
+  useEffect(() => {
+    if (!query) { setOrders([]); return; }
+
+    const controller = new AbortController();
+    let ignore = false;                       // guards against out-of-order resolution
+    setState("loading");
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/orders?q=${encodeURIComponent(query)}`,
+                                { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!ignore) { setOrders(data); setState("done"); }   // only the latest wins
+      } catch (e) {
+        if (e.name !== "AbortError" && !ignore) setState("error");
+      }
+    })();
+
+    // cleanup: cancel the request and disown its result
+    return () => { ignore = true; controller.abort(); };
+  }, [query]);                                // re-run only when the query changes
+
+  if (state === "loading") return <Spinner />;
+  if (state === "error")   return <p role="alert">Could not load orders.</p>;
+  return <ul>{orders.map(o => <li key={o._id}>{o.status}</li>)}</ul>;
+}
+
+// Subscription cleanup - the other classic use
+useEffect(() => {
+  const socket = new WebSocket("wss://api.example.com/orders");
+  socket.addEventListener("message", onMessage);
+  return () => socket.close();               // without this, every remount leaks a socket
+}, []);
+```
+
+### Output
+
+```
+type "ult" quickly:
+  request "u"   -> resolves 3rd  (ignored, aborted)
+  request "ul"  -> resolves 1st  (ignored, aborted)
+  request "ult" -> resolves 2nd  (rendered)
+UI shows results for "ult"        // without the guard it would show results for "u"
+```
+
+### Why Interviewers Ask This
+
+Effects are the hardest hook to use correctly, and the race-condition fix is a concrete signal of
+production experience. Interviewers also want to hear that in 2026 you would normally reach for
+TanStack Query or SWR rather than hand-rolling this.
+
+### Common Mistakes
+
+- Omitting dependencies to "stop the loop", creating stale closures instead.
+- No cleanup, leaking sockets, timers and listeners on every remount.
+- Assuming responses arrive in request order.
+- Putting an object or array literal in `deps` - a new reference each render means it always
+  re-runs.
+- Using an effect for derived state that could be computed during render.
+- Fighting Strict Mode's double invocation instead of fixing the missing cleanup it revealed.
+
+### Best Practices
+
+- Let the linter enforce the full dependency array; fix the design rather than silencing it.
+- Always return cleanup for anything subscribed, timed or in flight.
+- Use a data library (TanStack Query, SWR, or the framework loader) for fetching - it handles
+  caching, dedupe, retries and races for you.
+- Do not use effects to sync state that can be derived during render.
+
+### Follow-up Questions
+
+1. Why does an object in the dependency array cause an infinite loop?
+2. `useEffect` versus `useLayoutEffect` - which blocks paint?
+3. Why does Strict Mode run effects twice in development?
+4. How would `useSyncExternalStore` handle the socket case differently?
+5. What does the React team mean by "you might not need an effect"?
+
+### Real-world Scenario
+
+A dashboard opened a WebSocket in an effect with no cleanup. Users navigating between tabs
+accumulated connections; after an hour a browser held 90 sockets and the server hit its
+connection limit, taking live updates down for everyone. A one-line `return () => socket.close()`
+resolved it.
+
+---
+
+## MERN Q9
+
+**Difficulty:** Medium
+**Category:** React -> useMemo, useCallback, memo
+
+### Question
+
+When should you use `useMemo`, `useCallback` and `React.memo`? When are they harmful?
+
+### Answer
+
+All three are **referential-stability tools**, not general speed-ups.
+
+- `useMemo(fn, deps)` caches a computed **value** between renders.
+- `useCallback(fn, deps)` caches a **function identity** between renders.
+- `React.memo(Component)` skips re-rendering when props are shallow-equal.
+
+They are worth it when (a) a computation is genuinely expensive, or (b) a value or function is
+passed to a `memo`-ised child or used in another hook's dependency array. Without one of those,
+you pay the cost of the comparison plus retained memory for nothing.
+
+Critical interaction: `React.memo` is defeated by any new reference in props. Passing
+`onClick={() => ...}` or `style={{...}}` creates a new value each render, so the child always
+re-renders and `memo` is pure overhead. That is why `useCallback` and `memo` are usually adopted
+together or not at all.
+
+The React Compiler (stable in React 19) memoises automatically, which is making most manual
+memoisation unnecessary in new code - a good thing to mention.
+
+### Example
+
+A large order table with an expensive derived total and a memoised row component.
+
+### Code Example
+
+```jsx
+const OrderRow = React.memo(function OrderRow({ order, onSelect }) {
+  console.log("render row", order.id);
+  return <tr onClick={() => onSelect(order.id)}><td>{order.total}</td></tr>;
+});
+
+function OrderTable({ orders, filter }) {
+  const [selected, setSelected] = useState(null);
+
+  // WORTH IT: O(n) filter + sort over thousands of rows, recomputed only when inputs change
+  const visible = useMemo(
+    () => orders.filter(o => o.status === filter)
+                .sort((a, b) => b.total - a.total),
+    [orders, filter]
+  );
+
+  // WORTH IT: stable identity keeps React.memo on OrderRow effective
+  const handleSelect = useCallback(id => setSelected(id), []);
+
+  // NOT WORTH IT: trivial arithmetic, the memo costs more than the work
+  // const doubled = useMemo(() => count * 2, [count]);
+
+  return <table><tbody>
+    {visible.map(o => <OrderRow key={o.id} order={o} onSelect={handleSelect} />)}
+  </tbody></table>;
+}
+
+// Anti-pattern that silently disables memo:
+// <OrderRow order={o} onSelect={id => setSelected(id)} />   // new fn every render
+// <OrderRow order={{ ...o }} ... />                          // new object every render
+```
+
+### Output
+
+```
+// with useCallback + memo: typing in an unrelated input re-renders 0 rows
+render row 1 ... render row 500     (first mount only)
+
+// without useCallback: every parent render re-renders all 500 rows
+render row 1 ... render row 500     (on every keystroke)
+```
+
+### Why Interviewers Ask This
+
+It separates people who memoise reflexively from those who reason about renders. Saying "wrap
+everything in useMemo" is a negative signal.
+
+### Common Mistakes
+
+- Memoising trivial values, adding complexity and memory for no gain.
+- Using `React.memo` while passing fresh object or function literals, so it never helps.
+- Forgetting `useMemo`'s dependencies and serving a stale value.
+- Believing `useMemo` prevents re-renders - it caches a value; only `memo` skips renders.
+- Optimising before profiling with the React DevTools Profiler.
+
+### Best Practices
+
+- Profile first; memoise the measured hot path only.
+- Adopt `memo` plus `useCallback`/`useMemo` together, or neither.
+- Prefer structural fixes: lift state down, split components, virtualise long lists.
+- On React 19, evaluate the React Compiler before hand-memoising.
+
+### Follow-up Questions
+
+1. Why does `React.memo` not help when a child receives an inline arrow function?
+2. Difference between `useMemo` and `useRef` for caching?
+3. What does the React Compiler change about this advice?
+4. When would a custom comparator as `memo`'s second argument be justified?
+5. How do you virtualise a 50,000-row table instead of memoising it?
+
+### Real-world Scenario
+
+A team wrapped every component in `React.memo` and every handler in `useCallback` for
+"performance". Profiling showed memo comparisons costing more than the renders they skipped, and
+one stale `useMemo` dependency caused a pricing bug that shipped to production. Removing 80
+percent of the memoisation made the app measurably faster and the code simpler.
+
+---
+
+## MERN Q10
+
+**Difficulty:** Hard
+**Category:** React -> Virtual DOM, reconciliation
+
+### Question
+
+Explain the Virtual DOM and reconciliation. Why do keys matter?
+
+### Answer
+
+The Virtual DOM is a lightweight JavaScript tree describing the intended UI. On state change,
+React builds a new tree and **diffs** it against the previous one (reconciliation), then applies
+the minimal set of real DOM mutations. DOM writes are the expensive part; diffing plain objects
+is cheap by comparison.
+
+React's diff uses two heuristics to stay O(n) instead of O(n^3):
+
+1. **Different element type means discard the subtree.** `<div>` to `<span>` unmounts everything
+   inside, losing child state.
+2. **Keys identify children across renders.** Within a list, React matches elements by key, not
+   by position.
+
+That is why **index keys are dangerous**: if you prepend or reorder, index 0 now refers to a
+different item, so React reuses the wrong DOM node and its state - the classic symptom is a
+checkbox or input value attached to the wrong row.
+
+React 18+ adds **concurrent rendering**: rendering can be interrupted, paused and resumed, which
+is what makes `useTransition` and Suspense useful. Reconciliation itself is unchanged.
+
+### Example
+
+A list where deleting the first item moves a checked checkbox to the wrong row when keys are
+indexes.
+
+### Code Example
+
+```jsx
+// BROKEN: index keys plus per-row state
+function BadList({ items, onDelete }) {
+  return <ul>{items.map((item, i) => (
+    <li key={i}>                              {/* identity = position, not item */}
+      <input type="checkbox" />               {/* uncontrolled DOM state */}
+      {item.name}
+      <button onClick={() => onDelete(item.id)}>x</button>
+    </li>))}</ul>;
+}
+
+// CORRECT: stable identity from the data
+function GoodList({ items, onDelete }) {
+  return <ul>{items.map(item => (
+    <li key={item.id}>                        {/* identity survives reorder/delete */}
+      <input type="checkbox" />
+      {item.name}
+      <button onClick={() => onDelete(item.id)}>x</button>
+    </li>))}</ul>;
+}
+
+// Forcing a remount deliberately: change the key to reset all internal state
+<OrderForm key={selectedOrderId} order={order} />
+
+// Concurrent rendering: keep typing responsive while a heavy list re-renders
+function Search() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [isPending, startTransition] = useTransition();
+
+  return <>
+    <input value={query} onChange={e => {
+      setQuery(e.target.value);                       // urgent: keeps the input snappy
+      startTransition(() => setResults(filterHuge(e.target.value)));  // interruptible
+    }} />
+    {isPending && <Spinner />}
+    <BigList rows={results} />
+  </>;
+}
+```
+
+### Output
+
+```
+items: [A, B, C], user checks the box on B, then deletes A
+
+with key={i}:      remaining rows are [B, C] but the checkbox appears on C  (wrong)
+with key={item.id}: remaining rows are [B, C] and the checkbox stays on B   (correct)
+```
+
+### Why Interviewers Ask This
+
+Keys are asked in nearly every React interview, and the "why" - identity for reconciliation, not
+uniqueness for its own sake - is what they are actually testing. It also opens into concurrent
+rendering for senior candidates.
+
+### Common Mistakes
+
+- "Keys are for performance." They are primarily for **correctness**.
+- Using array index, `Math.random()`, or `uuid()` generated during render as a key. Random keys
+  force a full remount every render.
+- Believing the Virtual DOM is inherently faster than direct DOM manipulation - hand-written
+  optimal DOM code is faster; the VDOM buys a declarative model with good-enough performance.
+- Confusing concurrent rendering with multithreading. JavaScript remains single-threaded.
+
+### Best Practices
+
+- Key by a stable business id from the data.
+- Change a `key` intentionally when you *want* to reset a subtree's state.
+- Keep element types stable across renders to avoid subtree remounts.
+- Virtualise long lists; reconciliation still costs something per element.
+
+### Follow-up Questions
+
+1. What exactly happens to child state when an element's type changes?
+2. Why is `key={Math.random()}` catastrophic?
+3. How does `useTransition` change what the user perceives?
+4. What problem does Suspense with `React.lazy` solve at the bundle level?
+5. How does the reconciler decide to update in place versus remount?
+
+### Real-world Scenario
+
+A payments table used index keys with inline editing. Sorting by amount reordered rows while a
+user was mid-edit, and React reused the input DOM node - the edited value landed on a different
+transaction and was saved. Switching to `key={txn.id}` fixed it; the incident review made
+"no index keys" a lint rule.
+
+---
+
+## MERN Q11
+
+**Difficulty:** Medium
+**Category:** React -> State management, Context, Redux Toolkit
+
+### Question
+
+When do you need Redux Toolkit instead of Context or local state? What is the Context
+performance trap?
+
+### Answer
+
+Escalate only when the current tool hurts:
+
+1. **Local `useState`** - state used by one component or passed one level.
+2. **Lifted state / composition** - shared by a few siblings.
+3. **Context** - low-frequency global values: theme, locale, current user, feature flags.
+4. **Server-state library** (TanStack Query, SWR, RTK Query) - anything that comes from an API.
+   This eliminates most of what teams historically put in Redux.
+5. **Redux Toolkit / Zustand / Jotai** - genuinely global, frequently updated client state with
+   complex transitions, or when you need time-travel debugging and middleware.
+
+**The Context trap:** every consumer of a context re-renders when the context value changes,
+regardless of which part of the value it uses. A single context holding user, theme, cart and
+notifications re-renders the entire tree on any cart change. Mitigations: split into several
+narrow contexts, memoise the provider value, or use a store with selector-based subscriptions.
+
+The modern default for a MERN app: TanStack Query or RTK Query for server data, Context for a
+handful of static globals, and a small store only if genuinely needed.
+
+### Example
+
+Splitting one fat context, and a Redux Toolkit slice with a typed async thunk.
+
+### Code Example
+
+```jsx
+// ---------- Context trap and the fix ----------
+// BAD: one context, four unrelated concerns -> any change re-renders every consumer
+const AppContext = createContext(null);
+<AppContext.Provider value={{ user, theme, cart, notifications }}>
+
+// GOOD: split by change frequency, and memoise each value
+const UserContext  = createContext(null);   // changes rarely
+const ThemeContext = createContext(null);   // changes rarely
+const CartContext  = createContext(null);   // changes often -> isolated
+
+function Providers({ children }) {
+  const [user, setUser]   = useState(null);
+  const [theme, setTheme] = useState("light");
+  // memo so the object identity is stable across unrelated renders
+  const userValue  = useMemo(() => ({ user, setUser }),   [user]);
+  const themeValue = useMemo(() => ({ theme, setTheme }), [theme]);
+  return (
+    <UserContext.Provider value={userValue}>
+      <ThemeContext.Provider value={themeValue}>{children}</ThemeContext.Provider>
+    </UserContext.Provider>
+  );
+}
+
+// ---------- Redux Toolkit slice ----------
+import { createSlice, createAsyncThunk, configureStore } from "@reduxjs/toolkit";
+
+export const fetchOrders = createAsyncThunk(
+  "orders/fetch",
+  async (customerId, { rejectWithValue, signal }) => {
+    const res = await fetch(`/api/customers/${customerId}/orders`, { signal });
+    if (!res.ok) return rejectWithValue(await res.text());
+    return res.json();
+  }
+);
+
+const ordersSlice = createSlice({
+  name: "orders",
+  initialState: { items: [], status: "idle", error: null },
+  reducers: {
+    // Immer under the hood: "mutating" here produces an immutable update
+    orderCancelled(state, action) {
+      const o = state.items.find(i => i._id === action.payload);
+      if (o) o.status = "CANCELLED";
+    }
+  },
+  extraReducers: builder => {
+    builder
+      .addCase(fetchOrders.pending,   s => { s.status = "loading"; s.error = null; })
+      .addCase(fetchOrders.fulfilled, (s, a) => { s.status = "done"; s.items = a.payload; })
+      .addCase(fetchOrders.rejected,  (s, a) => { s.status = "error"; s.error = a.payload; });
+  }
+});
+
+export const { orderCancelled } = ordersSlice.actions;
+export const store = configureStore({ reducer: { orders: ordersSlice.reducer } });
+
+// selector keeps the component subscribed to one slice of state only
+const deliveredCount = useSelector(s =>
+  s.orders.items.filter(o => o.status === "DELIVERED").length);
+```
+
+### Output
+
+```
+// single fat context: changing cart quantity
+re-rendered: Header, Sidebar, ProductList, Footer, CartBadge     (all consumers)
+
+// split contexts: same change
+re-rendered: CartBadge                                            (only what depends on cart)
+```
+
+### Why Interviewers Ask This
+
+Over-engineering state is the most common architectural mistake in React codebases. They want to
+hear escalation with justification, and awareness that server state is a different problem from
+client state.
+
+### Common Mistakes
+
+- Reaching for Redux on day one for a form and a list.
+- Putting API response data in Redux by hand, then reimplementing caching, dedupe and
+  invalidation badly.
+- One giant context, then blaming React for slow renders.
+- Writing legacy hand-rolled Redux (`switch` reducers, `ADD_TODO` constants, spread updates)
+  instead of Redux Toolkit.
+- Storing derived data in state instead of computing it in a selector.
+
+### Best Practices
+
+- Server data belongs in a query library; client-only UI state belongs in local state or a store.
+- Split contexts by update frequency and memoise provider values.
+- Redux Toolkit, never hand-rolled Redux, if you choose Redux.
+- Keep the store normalised and derive with memoised selectors (`createSelector`).
+
+### Follow-up Questions
+
+1. Why does memoising the provider value matter?
+2. How does RTK Query differ from TanStack Query?
+3. What does `createSelector` memoisation prevent?
+4. When is Zustand or Jotai a better fit than Redux Toolkit?
+5. How would you persist part of the store to `localStorage` safely?
+
+### Real-world Scenario
+
+An app kept the entire API cache in one context. Every poll of the notifications endpoint changed
+the context value and re-rendered 200 components, pinning the CPU on low-end phones. Moving
+server data to TanStack Query and splitting the remaining context by concern cut interaction
+latency by roughly 70 percent and deleted about 1,200 lines of reducer code.
+
+---
+
+## MERN Q12
+
+**Difficulty:** Hard
+**Category:** Node.js -> Event loop
+
+### Question
+
+Explain the Node.js event loop. What is the order of `setTimeout`, `setImmediate`,
+`process.nextTick` and promise callbacks?
+
+### Answer
+
+Node is single-threaded for JavaScript but uses libuv's event loop plus a thread pool for file
+I/O, DNS and crypto. The loop runs phases in order:
+
+```
+   +------------------------------+
+-->|  timers        setTimeout/setInterval callbacks
+   +------------------------------+
+   |  pending callbacks  some system errors
+   +------------------------------+
+   |  idle / prepare     internal
+   +------------------------------+
+   |  poll          retrieve I/O events, execute I/O callbacks   <-- blocks here
+   +------------------------------+
+   |  check         setImmediate callbacks
+   +------------------------------+
+   |  close         'close' event handlers
+   +------------------------------+
+```
+
+**Between every phase**, and between each callback, Node drains two microtask queues in this
+order:
+
+1. `process.nextTick` queue - highest priority, drained completely first.
+2. Promise microtask queue - `then`, `catch`, `finally`, and continuations after `await`.
+
+So the ordering is: **synchronous code, then all `nextTick`, then all promise microtasks, then
+timers, then I/O, then `setImmediate`**. `setImmediate` runs in the *check* phase - after I/O -
+despite the name, whereas `setTimeout(fn, 0)` runs in the *timers* phase of the next iteration.
+
+Consequence: any CPU-bound synchronous work blocks the whole loop, and therefore every concurrent
+request. That is what `worker_threads` exists to solve.
+
+### Example
+
+Ordering puzzle - the canonical Node interview question.
+
+### Code Example
+
+```javascript
+const fs = require("node:fs");
+
+console.log("1: sync start");
+
+setTimeout(() => console.log("6: setTimeout 0"), 0);
+setImmediate(() => console.log("7: setImmediate"));
+
+Promise.resolve().then(() => console.log("4: promise then"));
+process.nextTick(() => console.log("3: nextTick"));
+
+queueMicrotask(() => console.log("5: queueMicrotask"));
+
+fs.readFile(__filename, () => {
+  console.log("8: fs read callback (poll phase)");
+  // inside an I/O callback, setImmediate beats setTimeout
+  setTimeout(() => console.log("10: timeout inside I/O"), 0);
+  setImmediate(() => console.log("9: immediate inside I/O"));
+});
+
+console.log("2: sync end");
+
+// ---- blocking the loop: what NOT to do ----
+function blockingHash(password) {           // ~1s of CPU, blocks every request
+  return require("node:crypto").pbkdf2Sync(password, "salt", 1_000_000, 64, "sha512");
+}
+
+// ---- correct: offload CPU work to the pool or a worker thread ----
+const { pbkdf2 } = require("node:crypto");
+const hashAsync = (pw) => new Promise((resolve, reject) =>
+  pbkdf2(pw, "salt", 1_000_000, 64, "sha512", (e, k) => e ? reject(e) : resolve(k)));
+
+const { Worker } = require("node:worker_threads");
+const runInWorker = (data) => new Promise((resolve, reject) => {
+  const w = new Worker("./cpu-task.js", { workerData: data });
+  w.on("message", resolve); w.on("error", reject);
+});
+```
+
+### Output
+
+```
+1: sync start
+2: sync end
+3: nextTick
+4: promise then
+5: queueMicrotask
+6: setTimeout 0
+7: setImmediate
+8: fs read callback (poll phase)
+9: immediate inside I/O
+10: timeout inside I/O
+```
+
+Note lines 9 and 10: inside an I/O callback the loop is in the poll phase, so the next phase is
+*check* - `setImmediate` fires before the timer.
+
+### Why Interviewers Ask This
+
+It is the definitive test of whether you understand Node's concurrency model rather than just its
+API surface. The practical payoff - never block the loop - is the point of the question.
+
+### Common Mistakes
+
+- Believing Node is multithreaded for JavaScript, or that it is single-threaded for everything
+  (file I/O and crypto use the thread pool).
+- Saying `setImmediate` runs before `setTimeout(fn, 0)` always - it depends on the current phase.
+- Forgetting `process.nextTick` outranks promises, and that a recursive `nextTick` can starve the
+  loop entirely.
+- Using `Sync` APIs (`readFileSync`, `pbkdf2Sync`) in a request path.
+- Assuming `worker_threads` helps with I/O - it is for CPU work.
+
+### Best Practices
+
+- Never run CPU-bound work on the main thread; use `worker_threads` or a separate service.
+- Prefer async APIs; reserve `Sync` variants for startup code.
+- Watch event loop lag as a first-class metric (`perf_hooks.monitorEventLoopDelay`).
+- Use `setImmediate` to yield between chunks when processing large arrays.
+- Size `UV_THREADPOOL_SIZE` when heavy on file or crypto operations.
+
+### Follow-up Questions
+
+1. Why does `setImmediate` beat `setTimeout` inside an I/O callback?
+2. How can `process.nextTick` starve the event loop?
+3. Which operations use the libuv thread pool?
+4. When do you use `cluster` versus `worker_threads`?
+5. How would you detect and alert on event loop lag in production?
+
+### Real-world Scenario
+
+An image service resized uploads synchronously with a CPU-bound library. Under 20 concurrent
+uploads the event loop stalled for 400 ms at a time, health checks timed out, and the
+orchestrator killed and restarted healthy pods in a loop. Moving resizing into a worker thread
+pool made p99 latency stable and stopped the restart cycle.
+
+---
+
+## MERN Q13
+
+**Difficulty:** Medium
+**Category:** Node.js -> Streams
+
+### Question
+
+What are Node streams and why use them instead of reading a whole file?
+
+### Answer
+
+A stream processes data in **chunks** rather than loading everything into memory. Reading a 2 GB
+CSV with `readFile` allocates 2 GB and risks the heap limit; a stream holds only the current chunk
+plus a bounded buffer.
+
+Four types: **Readable** (source), **Writable** (sink), **Duplex** (both, e.g. a socket), and
+**Transform** (Duplex that modifies data, e.g. gzip).
+
+**Backpressure** is the key concept: if the consumer is slower than the producer, the buffer grows
+until memory is exhausted. `write()` returning `false` signals "stop"; `pipe`/`pipeline` handle
+this automatically. Hand-rolling `data` handlers plus `write()` without honouring the return value
+is how production memory leaks are created.
+
+Always use `stream.pipeline` (or `pipeline` from `node:stream/promises`) rather than `.pipe()`:
+`pipe` does **not** forward errors or destroy the remaining streams, so a failure mid-chain leaks
+file descriptors.
+
+### Example
+
+Streaming a large export from MongoDB to a gzipped HTTP response with constant memory.
+
+### Code Example
+
+```javascript
+import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
+import { createReadStream, createWriteStream } from "node:fs";
+import { createGzip } from "node:zlib";
+
+// ---- memory comparison ----
+// BAD: entire file in RAM, OOM on large input
+const all = await fs.promises.readFile("orders.csv", "utf8");
+const rows = all.split("\n").map(parseRow);
+
+// GOOD: constant memory regardless of file size
+const toJsonLines = new Transform({
+  readableObjectMode: false,
+  transform(chunk, _enc, cb) {
+    // chunk-boundary safety: keep the partial trailing line for the next chunk
+    this._tail = (this._tail ?? "") + chunk.toString("utf8");
+    const lines = this._tail.split("\n");
+    this._tail = lines.pop();
+    cb(null, lines.filter(Boolean)
+                  .map(l => JSON.stringify(parseRow(l)) + "\n").join(""));
+  },
+  flush(cb) { cb(null, this._tail ? JSON.stringify(parseRow(this._tail)) + "\n" : ""); }
+});
+
+await pipeline(
+  createReadStream("orders.csv"),
+  toJsonLines,
+  createGzip(),
+  createWriteStream("orders.jsonl.gz")
+);   // errors anywhere reject here AND destroy every stream in the chain
+
+// ---- streaming a Mongo cursor to the HTTP response ----
+app.get("/api/orders/export", async (req, res) => {
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Content-Encoding", "gzip");
+  const cursor = db.collection("orders").find({}).stream();
+  try {
+    await pipeline(
+      cursor,
+      new Transform({ objectMode: true,
+        transform(doc, _e, cb) { cb(null, JSON.stringify(doc) + "\n"); } }),
+      createGzip(),
+      res
+    );
+  } catch (err) {
+    // client aborted or a stage failed; the response may be partially written
+    if (!res.headersSent) res.status(500).end();
+    req.log?.error({ err }, "export failed");
+  }
+});
+
+// ---- honouring backpressure by hand, when you must ----
+readable.on("data", chunk => {
+  if (!writable.write(chunk)) {      // false = buffer full
+    readable.pause();                // stop reading
+    writable.once("drain", () => readable.resume());
+  }
+});
+```
+
+### Output
+
+```
+# 2 GB input file
+readFile approach : RSS peaks at 2.4 GB, then
+                    FATAL ERROR: Reached heap limit - JavaScript heap out of memory
+pipeline approach : RSS stays around 70 MB, completes in 41 s
+
+# export endpoint, 1.2 million documents
+memory flat at ~90 MB; first bytes reach the client in 120 ms
+```
+
+### Why Interviewers Ask This
+
+Streams separate people who have handled real data volumes from those who have not. Backpressure
+and `pipeline`-over-`pipe` are the two details that demonstrate it.
+
+### Common Mistakes
+
+- `readFile` on user-supplied or unbounded files.
+- Using `.pipe()` and never handling errors, leaking descriptors on failure.
+- Ignoring the boolean return of `write()`.
+- Splitting on newlines per chunk without preserving the partial trailing line - a classic
+  corruption bug shown handled above.
+- Forgetting the client can abort mid-stream, leaving the cursor open.
+
+### Best Practices
+
+- `pipeline` from `node:stream/promises` for every chain.
+- Object mode for record streams; set `highWaterMark` deliberately for large records.
+- Stream responses for exports so time-to-first-byte stays low.
+- Clean up cursors and temp files in `finally`.
+- Prefer `for await (const chunk of readable)` for readable-only consumption.
+
+### Follow-up Questions
+
+1. What exactly is backpressure and how does `pipeline` manage it?
+2. Difference between `highWaterMark` in object mode and byte mode?
+3. Why does `.pipe()` not forward errors?
+4. How do async iterators compare with `data` event handlers?
+5. How would you resume a failed 10 GB upload?
+
+### Real-world Scenario
+
+A reporting endpoint built a 400 MB JSON array in memory before responding. Three concurrent
+requests exhausted the container's 1 GB limit and the pod was OOM-killed, taking unrelated
+traffic with it. Converting to NDJSON streaming held memory at 90 MB and reduced
+time-to-first-byte from 38 seconds to under a second.
+
+---
+
+
+# SECTION 8: JAVASCRIPT
+
+> **Compact format from here on.** All ten parts are still present; prose is trimmed to the
+> load-bearing points so the remaining syllabus can be covered. Code, output and follow-ups keep
+> full detail.
+
+## JS Q1
+
+**Difficulty:** Easy
+**Category:** JavaScript -> Scope, hoisting
+
+### Question
+
+Explain hoisting and the difference between `var`, `let` and `const`.
+
+### Answer
+
+Declarations are processed before code executes. `var` is hoisted to the top of its **function**
+scope and initialised to `undefined`. `let` and `const` are hoisted to the top of their **block**
+but left uninitialised - reading them before the declaration throws, and that window is the
+**Temporal Dead Zone (TDZ)**. Function declarations are fully hoisted; function *expressions* are
+not.
+
+| | `var` | `let` | `const` |
+| --- | --- | --- | --- |
+| Scope | function | block | block |
+| Redeclare | yes | no | no |
+| Reassign | yes | yes | no |
+| Before declaration | `undefined` | TDZ error | TDZ error |
+| On `globalThis` | yes | no | no |
+
+`const` freezes the **binding**, not the value: `const a = []; a.push(1)` is legal.
+
+### Example
+
+A loop closure - the classic `var` bug.
+
+### Code Example
+
+```javascript
+console.log(a);              // undefined  (var hoisted and initialised)
+// console.log(b);           // ReferenceError: Cannot access 'b' before initialization
+var a = 1;
+let b = 2;
+
+// var: one shared binding, all callbacks see the final value
+for (var i = 0; i < 3; i++) setTimeout(() => console.log("var", i), 0);
+// let: a fresh binding per iteration
+for (let j = 0; j < 3; j++) setTimeout(() => console.log("let", j), 0);
+
+const cfg = { retries: 3 };
+cfg.retries = 5;             // allowed: the object is mutable
+// cfg = {};                 // TypeError: Assignment to constant variable
+Object.freeze(cfg);          // shallow immutability if you need it
+```
+
+### Output
+
+```
+undefined
+var 3
+var 3
+var 3
+let 0
+let 1
+let 2
+```
+
+### Why Interviewers Ask This
+
+It is the entry-level filter for understanding scope, and the loop example doubles as a closure
+test.
+
+### Common Mistakes
+
+- Saying `let` is "not hoisted" - it is hoisted, just not initialised.
+- Believing `const` makes objects immutable.
+- Using `var` in modern code.
+- Not knowing `var` at top level attaches to `globalThis` while `let` does not.
+
+### Best Practices
+
+- `const` by default, `let` when reassignment is required, never `var`.
+- Declare at first use, in the narrowest block.
+- Enable `no-var` and `prefer-const` lint rules.
+
+### Follow-up Questions
+
+1. What is the TDZ and why does it exist?
+2. How would you fix the `var` loop without `let`? (IIFE per iteration.)
+3. Are function declarations hoisted differently from arrow functions assigned to `const`?
+4. What does `typeof undeclaredVar` return, and why does it not throw?
+
+### Real-world Scenario
+
+A migration to `let`/`const` surfaced a five-year-old bug: an event handler registered in a `var`
+loop had always attached the last row's id to every button, and the team had "fixed" it by
+re-querying the DOM on click. The scope fix removed 40 lines of workaround.
+
+---
+
+## JS Q2
+
+**Difficulty:** Medium
+**Category:** JavaScript -> Closures
+
+### Question
+
+What is a closure? Give a practical use and a memory-leak risk.
+
+### Answer
+
+A closure is a function bundled with the **lexical environment** it was created in. The inner
+function keeps its outer variables alive after the outer function returns, because it still
+references them. That is the mechanism behind data privacy, function factories, memoisation,
+`once`, debounce and throttle, and module state.
+
+The leak risk is the flip side: as long as the closure is reachable, everything it captures is
+retained - including large arrays or DOM nodes captured accidentally.
+
+### Example
+
+A private counter, a rate limiter, and a memoiser.
+
+### Code Example
+
+```javascript
+// 1. private state - no class, nothing accessible from outside
+function createCounter(start = 0) {
+  let count = start;                         // not reachable except via the closures
+  return {
+    increment: () => ++count,
+    reset:     () => { count = start; },
+    get value() { return count; }
+  };
+}
+const c = createCounter(10);
+c.increment(); c.increment();
+console.log(c.value, c.count);               // 12 undefined
+
+// 2. memoise: the cache lives in the closure
+function memoize(fn) {
+  const cache = new Map();
+  return (...args) => {
+    const key = JSON.stringify(args);
+    if (!cache.has(key)) cache.set(key, fn(...args));
+    return cache.get(key);
+  };
+}
+const slowSquare = n => { for (let i = 0; i < 1e7; i++); return n * n; };
+const fast = memoize(slowSquare);
+console.time("first");  fast(9); console.timeEnd("first");
+console.time("cached"); fast(9); console.timeEnd("cached");
+
+// 3. LEAK: the closure captures a 50 MB buffer it never uses
+function makeHandler() {
+  const bigBuffer = new Uint8Array(50 * 1024 * 1024);
+  const id = bigBuffer.length;               // only the length is needed
+  return () => console.log("id", id);        // ...but V8 may retain the whole scope
+}
+// FIX: capture only what you need, and null out the rest
+function makeHandlerFixed() {
+  let bigBuffer = new Uint8Array(50 * 1024 * 1024);
+  const id = bigBuffer.length;
+  bigBuffer = null;                          // release the reference
+  return () => console.log("id", id);
+}
+```
+
+### Output
+
+```
+12 undefined
+first: 12.402ms
+cached: 0.018ms
+```
+
+### Why Interviewers Ask This
+
+Closures underpin most intermediate JavaScript questions - debounce, currying, module pattern,
+React hooks. The leak angle distinguishes senior candidates.
+
+### Common Mistakes
+
+- Defining a closure as "a function inside a function" without mentioning the retained
+  environment.
+- Not connecting closures to the `var` loop problem.
+- Creating closures inside hot loops, allocating per iteration.
+- Forgetting that closures over DOM nodes prevent garbage collection after removal.
+
+### Best Practices
+
+- Capture the minimum; extract primitives rather than whole objects.
+- Use `WeakMap`/`WeakRef` for caches keyed by objects so entries can be collected.
+- Bound memo caches (LRU) - an unbounded `Map` is a slow leak.
+
+### Follow-up Questions
+
+1. Implement `once(fn)` so the function runs at most one time.
+2. How do closures explain stale state in React hooks?
+3. Why does a `WeakMap` cache avoid the leak a `Map` cache creates?
+4. Implement currying with closures.
+
+### Real-world Scenario
+
+A single-page app registered a resize handler per route that closed over the rendered dataset.
+Navigating between routes 30 times retained 30 datasets - about 600 MB - and Chrome tabs crashed
+on long sessions. Removing listeners on unmount and capturing only the needed fields fixed it.
+
+---
+
+## JS Q3
+
+**Difficulty:** Medium
+**Category:** JavaScript -> this, call, apply, bind
+
+### Question
+
+How is `this` determined? Compare `call`, `apply` and `bind`, and arrow functions.
+
+### Answer
+
+For normal functions, `this` is decided at **call time** by these rules, in priority order:
+
+1. `new Foo()` - `this` is the new instance.
+2. Explicit binding - `fn.call(obj)`, `fn.apply(obj)`, `fn.bind(obj)`.
+3. Implicit binding - `obj.fn()`, `this` is `obj`.
+4. Default - `undefined` in strict mode / modules, `globalThis` otherwise.
+
+**Arrow functions have no own `this`.** They capture it lexically from the enclosing scope and it
+cannot be reassigned - `bind`, `call` and `apply` cannot change it. That is why arrows are correct
+for callbacks and wrong for object methods that need the receiver, and for prototype methods.
+
+| | `call` | `apply` | `bind` |
+| --- | --- | --- | --- |
+| Args | comma list | array | comma list (partial) |
+| Invokes now | yes | yes | no - returns a new function |
+
+### Example
+
+The classic lost-`this` bug when a method is passed as a callback.
+
+### Code Example
+
+```javascript
+const order = {
+  id: 7,
+  items: ["Air Fryer", "USB-C Hub"],
+  // normal method: `this` depends on how it is called
+  describe() { return `Order ${this.id}: ${this.items.length} items`; },
+  // arrow as a method: `this` is module scope, NOT the object
+  describeBroken: () => `Order ${this?.id}`
+};
+
+console.log(order.describe());               // implicit binding works
+const detached = order.describe;
+// console.log(detached());                  // TypeError: cannot read 'id' of undefined
+
+console.log(detached.call(order));            // explicit
+console.log(detached.apply(order));           // same, array args
+const bound = detached.bind(order);
+console.log(bound());                         // permanently bound
+console.log(order.describeBroken());          // Order undefined
+
+// partial application with bind
+const rate = (pct, amount) => amount * (1 - pct / 100);
+const withGst = rate.bind(null, 18);
+console.log(withGst(1000));
+
+// callbacks: arrow keeps the enclosing `this`
+class OrderPoller {
+  constructor(id) { this.id = id; this.tries = 0; }
+  start() {
+    setInterval(() => { this.tries++; }, 1000);        // arrow: `this` is the instance
+    // setInterval(function () { this.tries++; }, 1000); // broken: `this` is Timeout
+  }
+}
+```
+
+### Output
+
+```
+Order 7: 2 items
+Order 7: 2 items
+Order 7: 2 items
+Order 7: 2 items
+Order undefined
+820
+```
+
+### Why Interviewers Ask This
+
+`this` confusion causes a large share of real JavaScript bugs, and the arrow-versus-method
+distinction is a precise, checkable piece of knowledge.
+
+### Common Mistakes
+
+- Using an arrow function as an object or prototype method that needs `this`.
+- Believing `bind` can be applied twice to rebind - the first wins.
+- Forgetting that in a module or strict mode, default `this` is `undefined`, not `globalThis`.
+- Using `self = this` in modern code instead of an arrow.
+
+### Best Practices
+
+- Arrows for callbacks and closures; normal methods on objects and classes.
+- Bind in the constructor or use class fields (`handle = () => {}`) for React class handlers.
+- Prefer passing explicit parameters over relying on dynamic `this`.
+
+### Follow-up Questions
+
+1. Write a polyfill for `Function.prototype.bind`.
+2. What is `this` inside a class field arrow function versus a prototype method?
+3. How does `this` behave in a `setTimeout` callback in non-strict mode?
+4. Why can `bind` not be undone?
+
+### Real-world Scenario
+
+A React class component passed `this.handleSubmit` directly to `onSubmit`. It worked in
+development because an unrelated HOC happened to bind it, and broke in production after the HOC
+was removed - "cannot read setState of undefined" on every submit. Class-field arrow handlers
+removed the whole category.
+
+---
+
+## JS Q4
+
+**Difficulty:** Hard
+**Category:** JavaScript -> Event loop, microtasks
+
+### Question
+
+Explain the browser event loop, the call stack, macrotasks and microtasks. Predict the output.
+
+### Answer
+
+JavaScript has one call stack. The event loop repeatedly: takes **one macrotask** from the task
+queue, runs it to completion, then **drains the entire microtask queue**, then lets the browser
+render if needed.
+
+- **Macrotasks:** `setTimeout`, `setInterval`, DOM events, network callbacks,
+  `MessageChannel`.
+- **Microtasks:** promise callbacks, `queueMicrotask`, `MutationObserver`.
+
+The critical asymmetry: **all** pending microtasks run before the next macrotask, and microtasks
+queued by microtasks are also drained in the same pass. An infinite microtask chain therefore
+freezes the page permanently, while an infinite `setTimeout` chain does not.
+
+`await x` is sugar for `x.then(continuation)`, so code after `await` is a microtask.
+`requestAnimationFrame` runs before paint, after microtasks.
+
+### Example
+
+The standard ordering puzzle.
+
+### Code Example
+
+```javascript
+console.log("1 script start");
+
+setTimeout(() => console.log("6 timeout"), 0);
+
+Promise.resolve()
+  .then(() => console.log("3 promise 1"))
+  .then(() => console.log("4 promise 2"));
+
+queueMicrotask(() => console.log("5 microtask"));
+
+(async function main() {
+  console.log("2 async body runs synchronously up to the first await");
+  await null;                             // everything after this is a microtask
+  console.log("3.5 after await");
+})();
+
+console.log("1.5 script end");
+
+// Microtask starvation demo - DO NOT run in a real page
+// function starve() { Promise.resolve().then(starve); }  // page freezes, no paint
+// function safe()   { setTimeout(safe, 0); }             // yields; page stays responsive
+```
+
+### Output
+
+```
+1 script start
+2 async body runs synchronously up to the first await
+1.5 script end
+3 promise 1
+3.5 after await
+5 microtask
+4 promise 2
+6 timeout
+```
+
+Ordering note: the first `.then`, the `await` continuation, and `queueMicrotask` were queued in
+that order; `promise 2` only queues after `promise 1` resolves, so it lands after them.
+
+### Why Interviewers Ask This
+
+It is the definitive async-model question for frontend roles. It also explains real symptoms -
+why a busy promise chain can block rendering.
+
+### Common Mistakes
+
+- Saying `setTimeout(fn, 0)` runs "immediately".
+- Treating promises as macrotasks.
+- Not knowing the async function body runs synchronously until the first `await`.
+- Believing `async` code runs on another thread.
+
+### Best Practices
+
+- Yield to the loop with `setTimeout` or `scheduler.yield()` when processing large batches.
+- Keep long tasks under 50 ms to protect INP.
+- Use `requestIdleCallback` for non-urgent work, Web Workers for CPU-heavy work.
+
+### Follow-up Questions
+
+1. Why can microtasks starve rendering but timers cannot?
+2. Where does `requestAnimationFrame` fit relative to microtasks?
+3. How does the Node event loop differ from the browser's?
+4. What does `await` desugar to exactly?
+
+### Real-world Scenario
+
+A grid component validated 5,000 rows in a promise chain with no yielding. Because every
+continuation was a microtask, the browser never got to paint and the tab appeared frozen for four
+seconds with no spinner. Chunking the work with `setTimeout` between batches let the spinner
+render and cut perceived latency dramatically.
+
+---
+
+## JS Q5
+
+**Difficulty:** Medium
+**Category:** JavaScript -> Promises, async/await
+
+### Question
+
+Compare `Promise.all`, `allSettled`, `race` and `any`. How do you handle partial failure?
+
+### Answer
+
+| Combinator | Resolves when | Rejects when | Use for |
+| --- | --- | --- | --- |
+| `all` | every promise fulfils | **first** rejection (fail fast) | all-or-nothing dependencies |
+| `allSettled` | every promise settles | never | independent tasks, partial success |
+| `race` | first promise **settles** | first settles as rejection | timeouts |
+| `any` | first **fulfilment** | all reject (`AggregateError`) | redundant sources, failover |
+
+`Promise.all` rejecting does **not** cancel the other promises - they keep running and their
+results are discarded, so unhandled rejections can still surface. Use `AbortController` for real
+cancellation.
+
+Sequential `await` in a loop is the most common performance bug: three 200 ms calls take 600 ms
+sequentially and 200 ms with `all`.
+
+### Example
+
+A dashboard needing profile, orders and recommendations, where recommendations are optional.
+
+### Code Example
+
+```javascript
+// SLOW: sequential, 600ms
+const profile = await getProfile(id);
+const orders  = await getOrders(id);
+const recs    = await getRecs(id);
+
+// FAST: parallel, ~200ms - independent calls should always be concurrent
+const [p, o, r] = await Promise.all([getProfile(id), getOrders(id), getRecs(id)]);
+
+// PARTIAL FAILURE: render the page even if recommendations are down
+const results = await Promise.allSettled([getProfile(id), getOrders(id), getRecs(id)]);
+const [prof, ord, recs] = results.map(x => x.status === "fulfilled" ? x.value : null);
+results.filter(x => x.status === "rejected")
+       .forEach(x => log.warn({ err: x.reason }, "dashboard widget failed"));
+
+// TIMEOUT with real cancellation
+async function fetchWithTimeout(url, ms = 3000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error("TIMEOUT")), ms);
+  try {
+    const res = await fetch(url, { signal: ac.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);                 // always clear, or the timer leaks
+  }
+}
+
+// FAILOVER across mirrors: first success wins
+const data = await Promise.any([
+  fetch("https://cdn1.example.com/data.json").then(r => r.json()),
+  fetch("https://cdn2.example.com/data.json").then(r => r.json())
+]);
+
+// BOUNDED concurrency: 500 items, at most 10 in flight
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: limit }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+```
+
+### Output
+
+```
+sequential : 612ms
+Promise.all: 204ms
+
+allSettled with recommendations down:
+  profile OK, orders OK, recs null
+  WARN dashboard widget failed: HTTP 503        // page still renders
+
+Promise.any with cdn1 failing: resolves from cdn2
+Promise.all with cdn1 failing: rejects immediately, cdn2 request still completes in background
+```
+
+### Why Interviewers Ask This
+
+Sequential awaits in a loop are extremely common in real code, and knowing `allSettled` versus
+`all` shows you have thought about graceful degradation.
+
+### Common Mistakes
+
+- `await` inside a `for` loop for independent work.
+- Assuming `Promise.all` cancels siblings on rejection.
+- Using `race` for failover, where a fast *rejection* wins - `any` is correct.
+- Forgetting `try/finally` to clear timers.
+- Unbounded `Promise.all` over 10,000 items, exhausting sockets or rate limits.
+
+### Best Practices
+
+- Parallelise independent work; keep `await` in a loop only for genuinely sequential steps.
+- `allSettled` for widgets and fan-out where partial results are useful.
+- Always attach timeouts and `AbortController` to network calls.
+- Cap concurrency explicitly for bulk work.
+
+### Follow-up Questions
+
+1. Why does `Promise.all` not cancel the other promises?
+2. Implement `Promise.all` from scratch.
+3. Difference between `race` and `any` when the first settle is a rejection?
+4. How do you retry with exponential backoff and jitter?
+5. What is an unhandled rejection and how do you catch it globally?
+
+### Real-world Scenario
+
+A checkout page awaited six independent service calls sequentially, totalling 2.8 seconds. Users
+abandoned at 8 percent above baseline. Wrapping them in `Promise.all` with `allSettled` for the
+two optional widgets brought it to 480 ms and recovered most of the abandonment.
+
+---
+
+## JS Q6
+
+**Difficulty:** Medium
+**Category:** JavaScript -> Debounce, throttle
+
+### Question
+
+Implement debounce and throttle. When do you use each?
+
+### Answer
+
+Both limit how often a function runs, differently:
+
+- **Debounce** - wait until activity **stops** for `delay` ms, then run once. Use for search
+  input, autosave, validation, resize completion.
+- **Throttle** - run at most once per `interval`, ignoring calls in between. Use for scroll,
+  mousemove, drag, analytics beacons, rate-limited APIs.
+
+Mnemonic: debounce fires **after** the storm; throttle fires **during** it, at a fixed rate.
+
+Production versions need `cancel`, `flush`, correct `this`, and the return value handled.
+
+### Example
+
+Search-as-you-type (debounce) versus infinite-scroll position tracking (throttle).
+
+### Code Example
+
+```javascript
+function debounce(fn, delay = 300, { leading = false } = {}) {
+  let timer = null, lastArgs = null;
+  function debounced(...args) {
+    lastArgs = args;
+    const callNow = leading && timer === null;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!leading) fn.apply(this, lastArgs);
+    }, delay);
+    if (callNow) fn.apply(this, args);
+  }
+  debounced.cancel = () => { clearTimeout(timer); timer = null; };
+  debounced.flush  = function () { if (timer) { clearTimeout(timer); timer = null;
+                                                fn.apply(this, lastArgs); } };
+  return debounced;
+}
+
+function throttle(fn, interval = 200, { trailing = true } = {}) {
+  let last = 0, timer = null, lastArgs = null;
+  return function throttled(...args) {
+    const now = Date.now();
+    const remaining = interval - (now - last);
+    lastArgs = args;
+    if (remaining <= 0) {
+      last = now;
+      clearTimeout(timer); timer = null;
+      fn.apply(this, args);
+    } else if (trailing && timer === null) {
+      // guarantee the final call is not lost
+      timer = setTimeout(() => { last = Date.now(); timer = null;
+                                 fn.apply(this, lastArgs); }, remaining);
+    }
+  };
+}
+
+// usage
+const search = debounce(q => fetch(`/api/search?q=${q}`), 300);
+input.addEventListener("input", e => search(e.target.value));
+
+const onScroll = throttle(() => console.log(window.scrollY), 200);
+window.addEventListener("scroll", onScroll, { passive: true });
+
+// In React, memoise so the debounced fn is not recreated each render,
+// and cancel on unmount:
+// const debounced = useMemo(() => debounce(save, 500), []);
+// useEffect(() => () => debounced.cancel(), [debounced]);
+```
+
+### Output
+
+```
+typing "ultrabook" (9 keystrokes in 800ms)
+  no debounce : 9 requests
+  debounce 300: 1 request  (fires 300ms after the last keystroke)
+
+scrolling for 2 seconds (~120 scroll events)
+  no throttle : 120 handler runs
+  throttle 200: 10 handler runs (+1 trailing)
+```
+
+### Why Interviewers Ask This
+
+It is the most common "implement this utility" whiteboard task, and it tests closures, timers and
+`this` at once.
+
+### Common Mistakes
+
+- Swapping the definitions.
+- Losing the final call in throttle (no trailing edge) - the user's last scroll position never
+  reported.
+- Recreating the debounced function on every React render, so the timer resets and it never fires.
+- Ignoring `this` and arguments by using an arrow wrapper.
+- Not cancelling on unmount, causing a setState-after-unmount warning.
+
+### Best Practices
+
+- Debounce user typing; throttle continuous streams.
+- Always expose `cancel` and call it in cleanup.
+- Use `{ passive: true }` for scroll listeners.
+- Consider `requestAnimationFrame` throttling for visual updates.
+
+### Follow-up Questions
+
+1. Implement throttle using `requestAnimationFrame`.
+2. What is leading versus trailing edge behaviour?
+3. How do you debounce an async function and ignore stale responses?
+4. When is `IntersectionObserver` better than a throttled scroll handler?
+
+### Real-world Scenario
+
+An autocomplete fired a request per keystroke. At 40,000 daily users the search cluster took 12x
+necessary load and rate limiting began rejecting real queries. A 300 ms debounce plus request
+cancellation cut search traffic by 92 percent with no perceived latency change.
+
+---
+
+## JS Q7
+
+**Difficulty:** Medium
+**Category:** JavaScript -> Prototypes
+
+### Question
+
+Explain the prototype chain. How does `class` relate to it?
+
+### Answer
+
+Every object has an internal `[[Prototype]]` link. Property lookup walks that chain until found or
+until `null`. `Object.getPrototypeOf(obj)` reads it; the legacy accessor is `__proto__`.
+
+For a constructor `F`, `new F()` creates an object whose prototype is `F.prototype`. Methods live
+on `F.prototype`, shared by all instances - that is the memory win over per-instance functions.
+
+`class` is **syntactic sugar** over this: it creates a constructor function, puts methods on
+`prototype`, and wires `extends` by setting the prototype chain. Differences from functions: class
+bodies are strict mode, not hoisted for use before definition, methods are non-enumerable, and the
+constructor cannot be called without `new`.
+
+```
+instance --[[Prototype]]--> Order.prototype --> Object.prototype --> null
+```
+
+### Example
+
+Prototype chain with `class` and its ES5 equivalent side by side.
+
+### Code Example
+
+```javascript
+class Order {
+  #internalNote = "private";                  // true private field
+  static count = 0;
+  constructor(id) { this.id = id; Order.count++; }
+  describe() { return `Order ${this.id}`; }   // on Order.prototype, shared
+  get label() { return `#${this.id}`; }
+}
+class RushOrder extends Order {
+  constructor(id, fee) { super(id); this.fee = fee; }
+  describe() { return `${super.describe()} (rush +${this.fee})`; }
+}
+
+const r = new RushOrder(7, 199);
+console.log(r.describe());
+console.log(Object.getPrototypeOf(r) === RushOrder.prototype);
+console.log(Object.getPrototypeOf(RushOrder.prototype) === Order.prototype);
+console.log(r instanceof Order, Order.count);
+console.log(Object.keys(r));                  // methods are NOT enumerable
+
+// ES5 equivalent of the same wiring
+function OrderES5(id) { this.id = id; }
+OrderES5.prototype.describe = function () { return "Order " + this.id; };
+function RushES5(id, fee) { OrderES5.call(this, id); this.fee = fee; }
+RushES5.prototype = Object.create(OrderES5.prototype);
+RushES5.prototype.constructor = RushES5;
+
+// hasOwnProperty vs inherited
+console.log(r.hasOwnProperty("describe"), "describe" in r);
+```
+
+### Output
+
+```
+Order 7 (rush +199)
+true
+true
+true 1
+[ 'id', 'fee' ]
+false true
+```
+
+### Why Interviewers Ask This
+
+Prototypes are what makes JavaScript's object model different from Java's, and `class` hides them.
+Interviewers check that you know what the sugar expands to.
+
+### Common Mistakes
+
+- Saying JavaScript "has real classes now" - it has prototypal inheritance with class syntax.
+- Confusing `F.prototype` (used to build instances) with `instance.__proto__` (the link itself).
+- Adding methods inside the constructor, creating a copy per instance.
+- Mutating `Object.prototype` - breaks every object and every `for...in`.
+- Forgetting `super()` before using `this` in a derived constructor.
+
+### Best Practices
+
+- Use `class` syntax; reserve manual prototype work for polyfills.
+- Prefer composition over deep inheritance chains.
+- `#private` fields over underscore conventions.
+- `Object.create(null)` for pure dictionaries with no inherited keys.
+
+### Follow-up Questions
+
+1. Difference between `__proto__` and `prototype`?
+2. How does `instanceof` actually work?
+3. What is prototypal versus classical inheritance?
+4. Why are class methods non-enumerable, and when does that matter?
+5. How would you implement `Object.create` yourself?
+
+### Real-world Scenario
+
+A utility library added a helper to `Array.prototype` without `Object.defineProperty`. Every
+`for...in` over arrays in the host app suddenly yielded the method name, corrupting a serialiser
+that had shipped for years. The fix was a standalone function; the lesson was never to extend
+built-in prototypes.
+
+---
+
+
+# SECTION 13: DATA STRUCTURES AND ALGORITHMS
+
+Every solution shows the brute-force approach first, then the optimised one, with complexity.
+
+## DSA Q1
+
+**Difficulty:** Easy
+**Category:** DSA -> Complexity analysis
+
+### Question
+
+Explain Big-O, Big-Theta and Big-Omega. Why do we drop constants?
+
+### Answer
+
+They bound how cost grows with input size `n`. **Big-O** is an upper bound (worst case),
+**Big-Omega** a lower bound (best case), **Big-Theta** a tight bound (both). Interviews say "O"
+but usually mean Theta of the worst case.
+
+Constants and lower-order terms are dropped because they do not affect *growth*: `3n^2 + 500n + 9`
+is `O(n^2)` because for large `n` the quadratic term dominates. Constants still matter in
+practice - an `O(n)` pass with terrible cache locality can lose to an `O(n log n)` one at
+realistic sizes - and saying so is a strong signal.
+
+| Growth | n = 10 | n = 1,000 | n = 1,000,000 |
+| --- | --- | --- | --- |
+| O(1) | 1 | 1 | 1 |
+| O(log n) | 3 | 10 | 20 |
+| O(n) | 10 | 1,000 | 1,000,000 |
+| O(n log n) | 33 | 10,000 | 20,000,000 |
+| O(n^2) | 100 | 1,000,000 | 10^12 (too slow) |
+| O(2^n) | 1,024 | overflow | overflow |
+
+Rule of thumb for coding rounds: about 10^8 simple operations per second. `n <= 20` suggests
+exponential or backtracking is acceptable; `n <= 10^3` allows O(n^2); `n <= 10^6` demands
+O(n log n) or better.
+
+### Example
+
+Amortised analysis of a dynamic array push: most pushes are O(1), a resize is O(n), but doubling
+makes the average O(1).
+
+### Code Example
+
+```python
+# O(n^2) - nested dependent loops
+def has_duplicate_slow(nums):
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            if nums[i] == nums[j]:
+                return True
+    return False
+
+# O(n) time, O(n) space - trade memory for time
+def has_duplicate_fast(nums):
+    seen = set()
+    for x in nums:
+        if x in seen:            # average O(1) hash lookup
+            return True
+        seen.add(x)
+    return False
+
+# O(n log n) time, O(1) extra space - when memory is the constraint
+def has_duplicate_sorted(nums):
+    nums = sorted(nums)                     # O(n log n)
+    return any(nums[i] == nums[i+1] for i in range(len(nums)-1))
+
+# Space complexity of recursion = call stack depth
+def sum_recursive(n):        # O(n) time, O(n) SPACE - stack frames
+    return 0 if n == 0 else n + sum_recursive(n - 1)
+
+def sum_iterative(n):        # O(n) time, O(1) space
+    total = 0
+    for i in range(1, n + 1):
+        total += i
+    return total
+```
+
+### Output
+
+```
+n = 20,000 random ints
+has_duplicate_slow  : 4.81 s
+has_duplicate_fast  : 0.002 s
+has_duplicate_sorted: 0.004 s
+
+sum_recursive(100000) -> RecursionError: maximum recursion depth exceeded
+sum_iterative(100000) -> 5000050000
+```
+
+### Why Interviewers Ask This
+
+Every algorithm answer must end with a complexity statement. Candidates who cannot analyse their
+own solution cannot be trusted to choose between two designs.
+
+### Common Mistakes
+
+- Ignoring space complexity, especially recursion stack depth.
+- Saying a hash lookup is "always O(1)" - worst case is O(n) with adversarial collisions.
+- Forgetting that slicing or copying inside a loop adds a hidden factor of n.
+- Confusing best case with average case for quicksort.
+- Analysing only the loop structure and missing the cost of built-in calls.
+
+### Best Practices
+
+- State time and space separately, and name the case (worst, average, amortised).
+- Use the operations-per-second heuristic to infer the intended complexity from constraints.
+- Mention constant factors and cache behaviour when they matter.
+
+### Follow-up Questions
+
+1. Why is dynamic array append amortised O(1)?
+2. Worst-case complexity of hash map lookup and how it is mitigated?
+3. What is the difference between amortised and average case?
+4. Given `n <= 10^5`, which complexities are acceptable?
+
+### Real-world Scenario
+
+A deduplication job used a nested loop over 60,000 records - fine on the 500-record test fixture,
+36 minutes in production. Replacing it with a set made it 40 ms. The bug was never in the logic;
+it was the missing complexity analysis at review time.
+
+---
+
+## DSA Q2
+
+**Difficulty:** Easy
+**Category:** DSA -> Two pointers
+
+### Question
+
+Given a sorted array and a target, find two numbers summing to the target. Then solve it for an
+unsorted array.
+
+### Answer
+
+**Sorted:** two pointers from both ends. If the sum is too small move `left` right; too large move
+`right` left. O(n) time, O(1) space - each step eliminates one candidate permanently.
+
+**Unsorted:** a hash map of value to index in one pass. O(n) time, O(n) space. Sorting first would
+cost O(n log n) and lose the original indices.
+
+Brute force is O(n^2) for both. The pattern generalises: two pointers work whenever the array is
+sorted and the predicate is monotonic.
+
+### Example
+
+`[1, 3, 4, 6, 8, 11]`, target 14 -> indices 3 and 4 (6 + 8).
+
+### Code Example
+
+```python
+# --- brute force: O(n^2) time, O(1) space ---
+def two_sum_brute(nums, target):
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            if nums[i] + nums[j] == target:
+                return [i, j]
+    return []
+
+# --- sorted input: two pointers, O(n) time, O(1) space ---
+def two_sum_sorted(nums, target):
+    left, right = 0, len(nums) - 1
+    while left < right:
+        s = nums[left] + nums[right]
+        if s == target:
+            return [left, right]
+        if s < target:
+            left += 1          # need a bigger sum
+        else:
+            right -= 1         # need a smaller sum
+    return []
+
+# --- unsorted input: hash map, O(n) time, O(n) space ---
+def two_sum_hash(nums, target):
+    seen = {}                          # value -> index
+    for i, x in enumerate(nums):
+        want = target - x
+        if want in seen:
+            return [seen[want], i]
+        seen[x] = i
+    return []
+
+# --- generalisation: three sum, O(n^2) after sorting ---
+def three_sum(nums):
+    nums.sort()
+    out = []
+    for i in range(len(nums) - 2):
+        if i and nums[i] == nums[i-1]:
+            continue                    # skip duplicate anchors
+        lo, hi = i + 1, len(nums) - 1
+        while lo < hi:
+            s = nums[i] + nums[lo] + nums[hi]
+            if s < 0:  lo += 1
+            elif s > 0: hi -= 1
+            else:
+                out.append([nums[i], nums[lo], nums[hi]])
+                while lo < hi and nums[lo] == nums[lo+1]: lo += 1
+                while lo < hi and nums[hi] == nums[hi-1]: hi -= 1
+                lo += 1; hi -= 1
+    return out
+```
+
+### Output
+
+```
+two_sum_sorted([1,3,4,6,8,11], 14) -> [3, 4]
+two_sum_hash([8,3,11,1,6,4], 14)   -> [0, 4]
+three_sum([-1,0,1,2,-1,-4])        -> [[-1,-1,2], [-1,0,1]]
+
+timing on n = 20,000, worst case
+  brute : 3.94 s
+  hash  : 0.004 s
+```
+
+### Why Interviewers Ask This
+
+It is the canonical warm-up, and the follow-up ("what if it is not sorted?", "what about three
+numbers?") tests whether you can adapt a pattern rather than recall a solution.
+
+### Common Mistakes
+
+- Sorting when indices must be returned from the original order.
+- Using the same element twice (`left == right`).
+- Adding the current number to the map before checking for its complement, so `target = 2*x`
+  matches an element with itself.
+- Forgetting duplicate skipping in three-sum, producing repeated triplets.
+
+### Best Practices
+
+- Clarify up front: sorted or not, indices or values, duplicates allowed, exactly one solution?
+- State the space-time trade-off explicitly - it is the point of the question.
+- Two pointers whenever the input is sorted; hashing when it is not.
+
+### Follow-up Questions
+
+1. What if the array is sorted but you must return values, not indices?
+2. Extend to four-sum - what is the complexity?
+3. What if the array is enormous and does not fit in memory?
+4. How would you find the pair whose sum is *closest* to the target?
+
+### Real-world Scenario
+
+A reconciliation tool matched payment amounts to invoice amounts with a nested loop over 80,000
+records each - 6.4 billion comparisons, hours of runtime. A hash map keyed by amount reduced it to
+a single pass finishing in under two seconds.
+
+---
+
+## DSA Q3
+
+**Difficulty:** Medium
+**Category:** DSA -> Sliding window
+
+### Question
+
+Find the length of the longest substring without repeating characters.
+
+### Answer
+
+Brute force checks every substring for uniqueness: O(n^3), or O(n^2) with an incremental set.
+
+The **sliding window** solution is O(n): expand `right` one character at a time; when a duplicate
+appears, move `left` forward past the previous occurrence. Each index enters and leaves the window
+at most once, so the total work is linear. Store the last index of each character to jump `left`
+directly instead of stepping.
+
+Sliding window applies whenever you need the best contiguous subarray satisfying a constraint that
+is monotone as the window grows.
+
+### Example
+
+`"abcabcbb"` -> `"abc"`, length 3. `"pwwkew"` -> `"wke"`, length 3.
+
+### Code Example
+
+```python
+# --- brute force: O(n^2) time, O(min(n, charset)) space ---
+def longest_unique_brute(s):
+    best = 0
+    for i in range(len(s)):
+        seen = set()
+        for j in range(i, len(s)):
+            if s[j] in seen:
+                break
+            seen.add(s[j])
+            best = max(best, j - i + 1)
+    return best
+
+# --- sliding window: O(n) time, O(min(n, charset)) space ---
+def longest_unique(s):
+    last = {}                       # char -> last index seen
+    best = left = 0
+    for right, ch in enumerate(s):
+        if ch in last and last[ch] >= left:
+            left = last[ch] + 1     # jump past the duplicate, never backwards
+        last[ch] = right
+        best = max(best, right - left + 1)
+    return best
+
+# --- variant: longest substring with at most k distinct characters ---
+def longest_k_distinct(s, k):
+    from collections import defaultdict
+    count, left, best = defaultdict(int), 0, 0
+    for right, ch in enumerate(s):
+        count[ch] += 1
+        while len(count) > k:               # shrink until the constraint holds
+            count[s[left]] -= 1
+            if count[s[left]] == 0:
+                del count[s[left]]
+            left += 1
+        best = max(best, right - left + 1)
+    return best
+
+# --- fixed-size window: max sum of any k consecutive elements ---
+def max_sum_window(nums, k):
+    window = sum(nums[:k])
+    best = window
+    for i in range(k, len(nums)):
+        window += nums[i] - nums[i - k]     # O(1) slide instead of re-summing
+        best = max(best, window)
+    return best
+```
+
+### Output
+
+```
+longest_unique("abcabcbb")     -> 3
+longest_unique("bbbbb")        -> 1
+longest_unique("pwwkew")       -> 3
+longest_unique("")             -> 0
+longest_k_distinct("eceba", 2) -> 3        # "ece"
+max_sum_window([2,1,5,1,3,2], 3) -> 9      # [5,1,3]
+
+n = 100,000 characters
+  brute : 12.3 s
+  window: 0.02 s
+```
+
+### Why Interviewers Ask This
+
+Sliding window is one of the highest-frequency patterns in coding rounds, and the `left` pointer
+must never move backwards - a subtle correctness detail interviewers watch for.
+
+### Common Mistakes
+
+- Moving `left` backwards when the duplicate is outside the current window - hence the
+  `last[ch] >= left` guard.
+- Using `left = last[ch] + 1` without that guard, which breaks on inputs like `"abba"`.
+- Recomputing the window sum from scratch, losing the O(1) slide.
+- Off-by-one in the length `right - left + 1`.
+- Not handling the empty string.
+
+### Best Practices
+
+- Decide first whether the window is fixed-size or variable-size.
+- For variable windows, expand with `right` and shrink with a `while` on the constraint.
+- Track only what the constraint needs - a count map, not the substring itself.
+
+### Follow-up Questions
+
+1. Trace `"abba"` and explain why the `>= left` guard is required.
+2. Return the substring itself rather than its length.
+3. Solve "minimum window substring containing all characters of T".
+4. How does this change for a Unicode string with combining characters?
+
+### Real-world Scenario
+
+A fraud rule needed the longest run of distinct device ids per session over a 400-million-event
+table. The first implementation was O(n^2) per session and never finished. A sliding window in a
+streaming job processed the whole day in eleven minutes.
+
+---
+
+## DSA Q4
+
+**Difficulty:** Medium
+**Category:** DSA -> Trees, BFS and DFS
+
+### Question
+
+Compare BFS and DFS on a binary tree. Implement level-order traversal and validate a BST.
+
+### Answer
+
+| | BFS (level order) | DFS (pre/in/post order) |
+| --- | --- | --- |
+| Data structure | queue | stack or recursion |
+| Space | O(w), w = max width | O(h), h = height |
+| Finds shortest path | yes, in unweighted graphs | no |
+| Natural for | level grouping, nearest node | path problems, subtree aggregation |
+
+For a balanced tree, height is O(log n) and width is O(n/2), so **DFS uses less memory**. For a
+degenerate (linked-list-shaped) tree, DFS recursion is O(n) deep and can overflow the stack while
+BFS holds only one node per level.
+
+**BST validation** must compare against an inherited range, not just the parent: a node in the
+left subtree of the root must be smaller than the root, not merely smaller than its immediate
+parent. Alternatively, an in-order traversal of a valid BST is strictly increasing.
+
+### Example
+
+```
+        8
+       / \
+      3   10
+     / \    \
+    1   6    14
+       / \   /
+      4   7 13
+```
+
+### Code Example
+
+```python
+from collections import deque
+
+class Node:
+    def __init__(self, val, left=None, right=None):
+        self.val, self.left, self.right = val, left, right
+
+# --- BFS level order: O(n) time, O(w) space ---
+def level_order(root):
+    if not root:
+        return []
+    out, q = [], deque([root])
+    while q:
+        level = []
+        for _ in range(len(q)):          # fix the level size before iterating
+            node = q.popleft()
+            level.append(node.val)
+            if node.left:  q.append(node.left)
+            if node.right: q.append(node.right)
+        out.append(level)
+    return out
+
+# --- DFS in-order, recursive: O(n) time, O(h) space ---
+def inorder(root, acc=None):
+    acc = [] if acc is None else acc
+    if root:
+        inorder(root.left, acc)
+        acc.append(root.val)
+        inorder(root.right, acc)
+    return acc
+
+# --- DFS iterative, avoids stack overflow on deep trees ---
+def inorder_iterative(root):
+    out, stack, cur = [], [], root
+    while cur or stack:
+        while cur:
+            stack.append(cur)
+            cur = cur.left
+        cur = stack.pop()
+        out.append(cur.val)
+        cur = cur.right
+    return out
+
+# --- BST validation with an inherited range: the CORRECT approach ---
+def is_valid_bst(node, low=float("-inf"), high=float("inf")):
+    if not node:
+        return True
+    if not (low < node.val < high):
+        return False
+    return (is_valid_bst(node.left,  low, node.val) and
+            is_valid_bst(node.right, node.val, high))
+
+# --- WRONG approach that passes many tests: only compares with the parent ---
+def is_valid_bst_wrong(node):
+    if not node: return True
+    if node.left and node.left.val >= node.val:   return False
+    if node.right and node.right.val <= node.val: return False
+    return is_valid_bst_wrong(node.left) and is_valid_bst_wrong(node.right)
+
+# --- max depth and diameter, both DFS aggregations ---
+def max_depth(root):
+    return 0 if not root else 1 + max(max_depth(root.left), max_depth(root.right))
+
+root = Node(8, Node(3, Node(1), Node(6, Node(4), Node(7))), Node(10, None, Node(14, Node(13))))
+```
+
+### Output
+
+```
+level_order(root)       -> [[8], [3, 10], [1, 6, 14], [4, 7, 13]]
+inorder(root)           -> [1, 3, 4, 6, 7, 8, 10, 13, 14]     # sorted => valid BST
+max_depth(root)         -> 4
+is_valid_bst(root)      -> True
+
+# the counter-example that exposes the wrong implementation
+bad = Node(8, Node(3, Node(1), Node(20)), Node(10))
+is_valid_bst(bad)       -> False     # correct: 20 > 8 but sits in the left subtree
+is_valid_bst_wrong(bad) -> True      # WRONG
+```
+
+### Why Interviewers Ask This
+
+Trees are the most common structure in interviews, and the BST validation counter-example is a
+classic trap that rewards careful reasoning over recall.
+
+### Common Mistakes
+
+- Validating a BST by comparing only with the direct parent.
+- In BFS, not capturing `len(q)` before the inner loop, so levels merge.
+- Using recursion on a possibly degenerate tree and overflowing the stack.
+- Confusing height (edges) with depth (nodes) - clarify the definition.
+- Forgetting duplicate handling: is `<=` allowed in a BST? Ask.
+
+### Best Practices
+
+- BFS with an explicit queue and per-level sizing; DFS iteratively when depth may be large.
+- Pass a range down for BST-style validation, or verify in-order is increasing.
+- Handle the empty tree first, always.
+
+### Follow-up Questions
+
+1. Produce the counter-example tree yourself and explain why it fools the naive check.
+2. Give the space complexity of BFS versus DFS for balanced and degenerate trees.
+3. How do you serialise and deserialise a binary tree?
+4. Find the lowest common ancestor in a BST and in a general binary tree.
+5. How does level-order help print a tree right-to-left per level?
+
+### Real-world Scenario
+
+A permissions service validated its role hierarchy with the parent-only check. A misconfigured
+import placed a high-privilege role under a low-privilege branch; the validator passed and the
+tree-based lookup granted admin rights to a support tier for three weeks. Range-based validation
+caught it immediately once deployed.
+
+---
+
+# SECTION 5: SYSTEM DESIGN
+
+## SD Q1
+
+**Difficulty:** Medium
+**Category:** System Design -> Scalability fundamentals
+
+### Question
+
+Explain vertical versus horizontal scaling, and the difference between latency and throughput.
+
+### Answer
+
+**Vertical scaling** (scale up) means a bigger machine. Simple, no code changes, no distributed
+problems - but there is a hardware ceiling, cost rises non-linearly, and it remains a single point
+of failure.
+
+**Horizontal scaling** (scale out) means more machines behind a load balancer. Near-unbounded and
+fault tolerant, but it forces you to solve state: sessions, caching, data partitioning,
+consistency.
+
+**Latency** is time per operation (measure p50, p95, p99 - never the mean, which hides tail
+behaviour). **Throughput** is operations per second. They are related but not the same: batching
+raises throughput while raising latency.
+
+Little's Law ties them together: `concurrency = throughput x latency`. To serve 5,000 requests per
+second at 200 ms each you need 1,000 concurrent slots.
+
+Availability arithmetic: three nines is about 8.8 hours of downtime a year, four nines about 53
+minutes, five nines about 5 minutes. Components in series multiply, so five 99.9 percent services
+in a request path give roughly 99.5 percent.
+
+### Example
+
+Capacity estimate for a service at 10 million daily active users.
+
+### Code Example
+
+```
+Assumptions
+  DAU                    10,000,000
+  requests per user/day  20
+  total requests/day     200,000,000
+  average QPS            200e6 / 86,400  ~= 2,300
+  peak factor            3x               ~= 7,000 QPS
+  payload                2 KB avg
+
+Server sizing
+  per-instance capacity  1,000 QPS (measured, not guessed)
+  instances needed       7,000 / 1,000 = 7  -> 10 with headroom + AZ spread
+
+Storage (1 KB per record, 3 replicas, 2 years)
+  200e6 records/day x 1 KB          = 200 GB/day
+  x 365 x 2                          = 146 TB
+  x 3 replicas                       = 438 TB
+  + 30% index/overhead               ~= 570 TB
+
+Bandwidth
+  7,000 QPS x 2 KB                   = 14 MB/s  = 112 Mbps egress
+
+Cache sizing (80/20 rule)
+  hot 20% of daily records           = 40e6 x 1 KB = 40 GB
+  -> a 64 GB Redis node with room to grow
+```
+
+```
+                        +-------------------+
+   clients ---> CDN ---> |  Load Balancer   |  (health checks, TLS termination)
+                        +---------+---------+
+                                  |
+                +-----------------+-----------------+
+                |                 |                 |
+          +-----v-----+     +-----v-----+     +-----v-----+
+          |  app x10  |     |  app x10  |     |  app x10  |   stateless
+          +-----+-----+     +-----+-----+     +-----+-----+
+                |                 |                 |
+                +--------+--------+--------+--------+
+                         |                 |
+                   +-----v-----+     +-----v------+
+                   |   Redis   |     |  Postgres  |
+                   |  (cache)  |     | primary +  |
+                   +-----------+     | 2 replicas |
+                                     +------------+
+```
+
+### Output
+
+```
+Result of the estimate
+  10 app instances across 3 availability zones
+  ~570 TB storage over 2 years -> partition by month, archive to object storage after 90 days
+  64 GB cache serving the hot 20%
+  target p99 < 250 ms, availability 99.95%
+```
+
+### Why Interviewers Ask This
+
+Every system design interview opens here. They want to see you *quantify* before you draw boxes,
+and that you reason about p99 rather than averages.
+
+### Common Mistakes
+
+- Drawing an architecture before estimating load.
+- Quoting average latency instead of percentiles.
+- Assuming horizontal scaling is free - it moves the problem to state and consistency.
+- Ignoring the peak-to-average ratio.
+- Forgetting replication and index overhead in storage maths.
+
+### Best Practices
+
+- State assumptions out loud and write them down; interviewers grade the reasoning.
+- Round aggressively - 2,300 QPS not 2,314.
+- Keep application servers stateless so scaling out is trivial.
+- Design for the peak, autoscale for the trough, and load test to find real per-instance capacity.
+
+### Follow-up Questions
+
+1. What breaks first as you scale out - and why is it usually the database?
+2. How does Little's Law inform thread pool and connection pool sizing?
+3. Why does availability degrade when you add services to a request path?
+4. When is vertical scaling the right answer?
+
+### Real-world Scenario
+
+A team autoscaled the application tier to 60 instances under launch load. Each instance opened 20
+database connections, so 1,200 connections hit a Postgres primary configured for 200; the database
+spent its time context switching and the whole system got slower as it scaled. A connection pooler
+capped at 150 total connections restored throughput with fewer instances.
+
+---
+
+## SD Q2
+
+**Difficulty:** Hard
+**Category:** System Design -> CAP, consistency
+
+### Question
+
+Explain the CAP theorem and what it actually forces you to choose. What is eventual consistency?
+
+### Answer
+
+CAP says that during a **network partition**, a distributed system can preserve either
+**consistency** (every read sees the latest write) or **availability** (every request gets a
+non-error response), not both. Partition tolerance is not optional in a real network, so the real
+choice is CP or AP **while partitioned**.
+
+The common misstatement is "pick two of three". When there is no partition, a system can be both
+consistent and available; CAP only constrains behaviour during the partition.
+
+**PACELC** extends it usefully: if **P**artitioned choose **A** or **C**; **E**lse (normal
+operation) choose **L**atency or **C**onsistency. This captures the real trade-off most systems
+make daily.
+
+**Eventual consistency** means replicas converge if writes stop. Acceptable for like counts,
+timelines and product search; unacceptable for account balances and seat inventory. Middle grounds
+worth naming: read-your-writes, monotonic reads, and causal consistency - usually enough for
+user-facing correctness.
+
+| System | Choice | Note |
+| --- | --- | --- |
+| Postgres single primary | CP | writes stop if the primary is unreachable |
+| DynamoDB, Cassandra | AP, tunable | quorum settings move it toward CP |
+| MongoDB replica set | CP by default | `w: majority` |
+| ZooKeeper, etcd | CP | consensus, used for coordination |
+| DNS | AP | famously eventually consistent |
+
+### Example
+
+A shopping cart (AP is fine - merge concurrent edits) versus payment capture (CP required - never
+double-charge).
+
+### Code Example
+
+```
+CP behaviour during a partition
+   +--------+        X  network split  X        +--------+
+   | node A |  <-------------------------->     | node B |
+   | leader |                                   |follower|
+   +--------+                                   +--------+
+   writes OK (has quorum)                       reads may be refused or stale-flagged
+   -> minority side returns errors rather than serving stale data
+
+AP behaviour during the same partition
+   both sides accept writes -> divergence -> conflict resolution on heal
+   strategies: last-write-wins (data loss), vector clocks, CRDTs (mergeable), app-level merge
+```
+
+```javascript
+// Tunable consistency, Cassandra-style: choose per query
+// R + W > N  gives strong consistency
+// N = 3 replicas
+//   W=1, R=1 -> fast, eventually consistent      (1 + 1 < 3)
+//   W=2, R=2 -> strongly consistent              (2 + 2 > 3)
+//   W=3, R=1 -> fast reads, slow writes
+
+// Read-your-own-writes without full strong consistency:
+// route the user to the primary for a short window after their write
+const writeAt = Date.now();
+sessionStorage.setItem("lastWriteAt", writeAt);
+const readPreference =
+  Date.now() - Number(sessionStorage.getItem("lastWriteAt")) < 5000
+    ? "primary"          // recent writer: read authoritative
+    : "secondaryPreferred";
+
+// Idempotency: the practical defence when you choose AP and must retry
+await payments.updateOne(
+  { idempotencyKey: key },                       // unique index on this field
+  { $setOnInsert: { orderId, amount, status: "CAPTURED", at: new Date() } },
+  { upsert: true }                               // duplicate retries are no-ops
+);
+```
+
+### Output
+
+```
+Cart service (AP):    partition -> both regions accept adds -> merged on heal (union of items)
+                      user impact: an item briefly missing, never an error
+
+Payment service (CP): partition -> minority region rejects captures with 503
+                      user impact: "try again", never a double charge
+
+Idempotent capture: 4 retries of the same key -> 1 payment row, 3 no-ops
+```
+
+### Why Interviewers Ask This
+
+CAP is the vocabulary for every replication and multi-region question. Reciting the theorem is
+table stakes; the signal is mapping it to concrete product decisions - which features tolerate
+staleness and which do not.
+
+### Common Mistakes
+
+- "Pick two of three" - CAP constrains behaviour only during a partition.
+- Claiming a single-node database is CP (with no partition, CAP does not apply).
+- Confusing the C in CAP (linearisability) with the C in ACID (constraint validity).
+- Treating eventual consistency as a synonym for unreliable.
+- Choosing strong consistency globally, then being surprised by cross-region write latency.
+
+### Best Practices
+
+- Decide consistency **per feature**, not per system.
+- Make every write idempotent so retries are safe under either choice.
+- Use read-your-writes routing for the perceived-correctness cases.
+- Prefer CRDTs or explicit merge over last-write-wins, which silently loses data.
+- Design and test the partition path; it is the path that will page you.
+
+### Follow-up Questions
+
+1. What is PACELC and why is it more useful day to day?
+2. How do quorum reads and writes give tunable consistency?
+3. What is a split brain and how does fencing prevent it?
+4. Where do CRDTs fit, and give a concrete example.
+5. How would you implement read-your-own-writes across regions?
+
+### Real-world Scenario
+
+A multi-region inventory service used last-write-wins replication for "simplicity". A partition
+between regions lasted nine minutes; both accepted decrements for the same SKUs, and on heal the
+later timestamp overwrote the other region's sales. About 1,800 units were oversold. The rebuild
+made the stock counter a CRDT-style counter with per-region reservations and a CP path for final
+allocation.
+
+---
+
+
+# SECTION 4: COMPUTER NETWORKS
+
+## NET Q1
+
+**Difficulty:** Easy
+**Category:** Networks -> TCP vs UDP
+
+### Question
+
+Compare TCP and UDP. When would you deliberately choose UDP?
+
+### Answer
+
+| | TCP | UDP |
+| --- | --- | --- |
+| Connection | handshake first | connectionless |
+| Delivery | guaranteed, ordered | best effort, may drop or reorder |
+| Congestion control | yes | none (app must implement) |
+| Header | 20 bytes | 8 bytes |
+| Speed | slower, head-of-line blocking | lower latency |
+| Used by | HTTP/1.1 and 2, SSH, SMTP | DNS, DHCP, VoIP, games, QUIC/HTTP3 |
+
+TCP's three-way handshake (SYN, SYN-ACK, ACK) costs one round trip before any data, plus another
+one or two for TLS. UDP sends immediately.
+
+Choose UDP when **stale data is worthless**: in a voice call, retransmitting a 300 ms-old packet is
+worse than dropping it. QUIC (the basis of HTTP/3) runs on UDP and rebuilds reliability per stream,
+which removes TCP's head-of-line blocking - one lost packet no longer stalls every stream on the
+connection.
+
+### Example
+
+A video call drops frames rather than freezing; a file download must not lose a byte.
+
+### Code Example
+
+```
+TCP connection establishment and teardown
+  client                     server
+    | ---------- SYN --------> |
+    | <------ SYN-ACK -------- |     1 RTT before any application data
+    | ---------- ACK --------> |
+    | ===== HTTP request ====> |
+    | <==== HTTP response ==== |
+    | --------- FIN ---------> |
+    | <------ FIN-ACK -------- |
+
+Head-of-line blocking, HTTP/2 over TCP: one lost segment stalls ALL streams
+  stream1 [##########]
+  stream2 [####X-----]  <- packet loss here
+  stream3 [##########]  <- delivered but BLOCKED behind stream2 at the transport layer
+
+HTTP/3 over QUIC (UDP): streams are independent
+  stream2 loss affects only stream2
+```
+
+```bash
+# observe the handshake
+tcpdump -n -i any 'tcp port 443 and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0)'
+
+# TCP: connection refused is a fast, explicit signal
+curl -v --max-time 3 http://localhost:9999
+# UDP: no such signal - a DNS query just times out
+dig @192.0.2.1 example.com +timeout=2
+```
+
+### Output
+
+```
+14:02:11.104 IP 10.0.0.5.51234 > 93.184.216.34.443: Flags [S], seq 1829..
+14:02:11.128 IP 93.184.216.34.443 > 10.0.0.5.51234: Flags [S.], seq 4021..
+14:02:11.128 IP 10.0.0.5.51234 > 93.184.216.34.443: Flags [.], ack 4022..
+# 24 ms consumed before the first request byte
+
+curl: (7) Failed to connect to localhost port 9999: Connection refused
+;; connection timed out; no servers could be reached
+```
+
+### Why Interviewers Ask This
+
+It is the foundational transport question and it leads naturally into HTTP/3, real-time systems and
+latency budgets.
+
+### Common Mistakes
+
+- "UDP is unreliable so never use it" - it is the right choice for real-time media and DNS.
+- Not knowing HTTP/3 runs on UDP.
+- Claiming TCP guarantees delivery to the *application* - it guarantees to the kernel buffer; the
+  app can still crash.
+- Confusing flow control (receiver-driven) with congestion control (network-driven).
+
+### Best Practices
+
+- TCP for correctness-critical transfer; UDP plus application-level recovery for real-time.
+- Enable HTTP/2 or HTTP/3 and connection reuse to amortise handshakes.
+- Set explicit connect and read timeouts on every client.
+- Use TLS 1.3 (one round trip) and session resumption.
+
+### Follow-up Questions
+
+1. What problem does QUIC solve that HTTP/2 could not?
+2. Explain the TCP sliding window and slow start.
+3. What is TIME_WAIT and why can it exhaust ports?
+4. How does DNS use both UDP and TCP?
+
+### Real-world Scenario
+
+A mobile game used TCP for position updates. On lossy cellular links a single dropped packet
+stalled the stream and players saw a two-second freeze, then a teleport. Moving positional data to
+UDP with client-side interpolation made movement smooth even at 5 percent packet loss.
+
+---
+
+## NET Q2
+
+**Difficulty:** Medium
+**Category:** Networks -> HTTPS, TLS
+
+### Question
+
+What happens when you type a URL and press Enter? Where does TLS fit?
+
+### Answer
+
+1. **URL parse** - scheme, host, port, path.
+2. **DNS resolution** - browser cache, OS cache, `/etc/hosts`, then recursive resolver ->
+   root -> TLD -> authoritative; result cached per TTL.
+3. **TCP handshake** - SYN, SYN-ACK, ACK (one RTT). HTTP/3 skips this and uses QUIC over UDP.
+4. **TLS handshake** - `ClientHello` (versions, ciphers, SNI), `ServerHello` plus certificate,
+   certificate chain validation against the trust store, key exchange (ECDHE for forward secrecy),
+   then symmetric keys. TLS 1.3 needs one RTT, or zero with resumption.
+5. **HTTP request** - method, path, headers, cookies.
+6. **Server processing** - load balancer, app, cache, database.
+7. **Response** - status, headers, body; browser parses HTML, builds the DOM and CSSOM, runs
+   JavaScript, paints.
+
+TLS gives **confidentiality** (encryption), **integrity** (MAC/AEAD) and **authentication** (the
+certificate proves the server's identity). It does not hide *which host* you contacted - SNI is
+plaintext unless Encrypted Client Hello is in use.
+
+### Example
+
+`https://shop.example.com/orders/7` from a cold browser cache.
+
+### Code Example
+
+```
+Timeline for a cold connection
+  DNS lookup        24 ms   +---------+
+  TCP handshake     28 ms             +------+
+  TLS handshake     31 ms                    +-------+
+  request sent       1 ms                            +
+  server processing 92 ms                             +----------------+
+  response download 18 ms                                             +-----+
+  total            194 ms
+Warm connection (keep-alive): ~110 ms - the first three steps disappear
+```
+
+```bash
+# inspect the certificate chain and negotiated protocol
+openssl s_client -connect example.com:443 -servername example.com -tls1_3 </dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+
+# measure each phase
+curl -w "dns:%{time_namelookup} connect:%{time_connect} tls:%{time_appconnect} \
+ttfb:%{time_starttransfer} total:%{time_total}\n" -o /dev/null -s https://example.com
+
+# trace resolution
+dig +trace example.com
+```
+
+### Output
+
+```
+subject=CN = example.com
+issuer=C = US, O = DigiCert Inc, CN = DigiCert TLS RSA SHA256 2020 CA1
+notBefore=Jan 15 00:00:00 2026 GMT
+notAfter=Apr 15 23:59:59 2026 GMT
+
+dns:0.024 connect:0.052 tls:0.083 ttfb:0.175 total:0.194
+```
+
+### Why Interviewers Ask This
+
+It is the broadest possible systems question - it lets the interviewer follow whichever layer they
+care about, from DNS caching to render blocking.
+
+### Common Mistakes
+
+- Skipping DNS or TLS entirely.
+- Saying HTTPS "encrypts the URL" - the path is encrypted, but the hostname leaks via SNI and DNS.
+- Believing TLS uses asymmetric encryption for the whole session; it is used only to establish
+  symmetric keys.
+- Not knowing certificate validation checks chain, hostname, validity dates and revocation.
+
+### Best Practices
+
+- TLS 1.3, HSTS, OCSP stapling, and automated certificate renewal.
+- Keep connections alive; use HTTP/2 or HTTP/3.
+- Put static assets on a CDN close to users; preconnect and DNS-prefetch critical origins.
+- Monitor certificate expiry as a first-class alert.
+
+### Follow-up Questions
+
+1. What is SNI and why does it matter for shared hosting?
+2. How does HSTS prevent SSL stripping?
+3. What is forward secrecy and which key exchange provides it?
+4. Difference between DNS A, AAAA, CNAME and ALIAS records?
+5. What is a TLS termination point and what changes behind it?
+
+### Real-world Scenario
+
+A payment gateway's intermediate certificate expired at 02:00 UTC. Browsers with a cached chain
+kept working, so monitoring stayed green, while fresh mobile clients failed TLS validation. Two
+hours of failed checkouts followed. The fix was automated renewal plus a synthetic check from a
+cold client that validates the full chain.
+
+---
+
+# SECTION 14: OBJECT-ORIENTED PROGRAMMING
+
+## OOP Q1
+
+**Difficulty:** Medium
+**Category:** OOP -> SOLID
+
+### Question
+
+Explain the SOLID principles with one concrete violation and fix each.
+
+### Answer
+
+| Principle | Statement | Smell it prevents |
+| --- | --- | --- |
+| **S**ingle Responsibility | a class has one reason to change | god classes |
+| **O**pen/Closed | open to extension, closed to modification | editing a switch for every new case |
+| **L**iskov Substitution | a subtype must be usable wherever the base type is | subclass throwing on inherited methods |
+| **I**nterface Segregation | many small interfaces beat one fat one | implementing methods you must stub out |
+| **D**ependency Inversion | depend on abstractions, not concretions | untestable code welded to a driver |
+
+The most-violated is Liskov: the classic `Square extends Rectangle` breaks callers that set width
+and height independently. `Penguin extends Bird` with `fly()` throwing is the same error.
+
+### Example
+
+An order processor that formats invoices, charges cards and sends email - three reasons to change.
+
+### Code Example
+
+```java
+// ===== VIOLATION: SRP + OCP + DIP in one class =====
+class OrderProcessor {
+    void process(Order o, String paymentType) {
+        if (paymentType.equals("CARD"))      new StripeClient().charge(o);   // DIP: concrete
+        else if (paymentType.equals("UPI"))  new RazorpayClient().charge(o); // OCP: edit to extend
+        String html = "<h1>Invoice " + o.getId() + "</h1>";                  // SRP: formatting
+        new SmtpMailer().send(o.getEmail(), html);                           // SRP: delivery
+    }
+}
+
+// ===== FIXED =====
+interface PaymentGateway { PaymentResult charge(Order order); }   // abstraction (DIP)
+class StripeGateway   implements PaymentGateway { public PaymentResult charge(Order o) {...} }
+class RazorpayGateway implements PaymentGateway { public PaymentResult charge(Order o) {...} }
+// adding a new gateway requires NO change to existing code (OCP)
+
+interface InvoiceRenderer { String render(Order order); }          // one responsibility
+interface Notifier        { void notify(String to, String body); } // one responsibility (ISP)
+
+class OrderProcessor {
+    private final PaymentGateway gateway;        // injected, so it is testable (DIP)
+    private final InvoiceRenderer renderer;
+    private final Notifier notifier;
+
+    OrderProcessor(PaymentGateway g, InvoiceRenderer r, Notifier n) {
+        this.gateway = g; this.renderer = r; this.notifier = n;
+    }
+
+    void process(Order order) {                  // one reason to change: orchestration (SRP)
+        PaymentResult result = gateway.charge(order);
+        if (!result.isSuccess()) throw new PaymentFailedException(result.getError());
+        notifier.notify(order.getEmail(), renderer.render(order));
+    }
+}
+
+// ===== LISKOV violation and the fix =====
+class Rectangle { void setWidth(int w){...} void setHeight(int h){...} int area(){...} }
+class Square extends Rectangle {                 // BREAKS callers
+    void setWidth(int w)  { super.setWidth(w); super.setHeight(w); }
+}
+// caller assumes independence and now fails:
+//   r.setWidth(5); r.setHeight(4); assert r.area() == 20;   // Square gives 16
+// FIX: prefer composition; Shape interface with immutable Square(side) and Rectangle(w,h)
+```
+
+### Output
+
+```
+// with injection, the unit test needs no network
+new OrderProcessor(new FakeGateway(), new PlainRenderer(), new CapturingNotifier())
+    .process(order);
+=> assertions on the captured notification, 0 ms, no Stripe account required
+
+// before: the same test needed live Stripe credentials and an SMTP server
+```
+
+### Why Interviewers Ask This
+
+SOLID is the shared vocabulary for code review at mid level and above. Reciting the acronym is
+worth little; identifying a violation in supplied code is the actual test.
+
+### Common Mistakes
+
+- Listing the letters without concrete examples.
+- Reading SRP as "one method per class".
+- Confusing dependency inversion (depend on abstractions) with dependency injection (a technique
+  for supplying them).
+- Creating an interface per class reflexively - abstraction with one implementation and no seam is
+  just indirection.
+- Using inheritance for code reuse where composition fits.
+
+### Best Practices
+
+- Introduce an interface when you have a second implementation or need a test seam - not before.
+- Constructor injection; avoid service locators and static singletons.
+- Favour composition over inheritance; keep hierarchies shallow.
+- Let SOLID be a diagnostic for pain, not a checklist applied up front.
+
+### Follow-up Questions
+
+1. Give a Liskov violation from your own experience.
+2. How does the strategy pattern implement OCP?
+3. When does an interface with a single implementation still pay for itself?
+4. How do SOLID and DRY conflict?
+5. What is the difference between DIP and DI?
+
+### Real-world Scenario
+
+A billing class had 2,400 lines and 11 reasons to change. Every payment provider addition risked
+the invoice logic, and its tests needed live credentials so they were disabled in CI. Splitting it
+along the seams above took the test suite from zero effective coverage to 94 percent and cut new
+provider integration from two weeks to two days.
+
+---
+
+# SECTION 16: OPERATING SYSTEMS
+
+## OS Q1
+
+**Difficulty:** Easy
+**Category:** OS -> Process vs thread
+
+### Question
+
+Difference between a process and a thread? What is a context switch?
+
+### Answer
+
+A **process** is an executing program with its own virtual address space, file descriptors and
+resources. A **thread** is a unit of execution *inside* a process; threads share the heap, code and
+descriptors but each has its own stack, registers and program counter.
+
+| | Process | Thread |
+| --- | --- | --- |
+| Memory | isolated | shared heap, own stack |
+| Creation cost | high (page tables, PCB) | low |
+| Crash impact | contained | can take down the process |
+| Communication | IPC: pipes, sockets, shared memory | shared variables (needs synchronisation) |
+| Context switch | expensive (TLB and cache flush) | cheaper (same address space) |
+
+A **context switch** saves the current execution state (registers, program counter, stack pointer)
+and restores another's. Direct cost is a few microseconds; the indirect cost - cold CPU caches and
+TLB misses - is usually larger. Excessive switching is *thrashing*, visible as high system CPU with
+low throughput.
+
+### Example
+
+A browser uses one process per tab for isolation, and threads inside each tab for rendering,
+networking and compositing.
+
+### Code Example
+
+```c
+// process: fork() gives a copy-on-write duplicate of the address space
+pid_t pid = fork();
+if (pid == 0) {
+    printf("child  pid=%d counter=%d\n", getpid(), counter++);   // separate copy
+    _exit(0);
+} else {
+    wait(NULL);
+    printf("parent pid=%d counter=%d\n", getpid(), counter);     // unchanged by the child
+}
+```
+
+```c
+// threads: shared memory means a data race without synchronisation
+#include <pthread.h>
+long shared = 0;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+void *worker(void *_) {
+    for (int i = 0; i < 100000; i++) {
+        pthread_mutex_lock(&lock);      // remove this to see the race
+        shared++;                       // read-modify-write is NOT atomic
+        pthread_mutex_unlock(&lock);
+    }
+    return NULL;
+}
+// 4 threads x 100000 increments -> expected 400000
+```
+
+```bash
+# observe context switches and their cost
+vmstat 1 3          # 'cs' column = context switches per second
+pidstat -w -p <pid> 1    # voluntary vs involuntary switches per process
+```
+
+### Output
+
+```
+child  pid=4821 counter=0
+parent pid=4820 counter=0        # isolated address spaces
+
+with mutex   : shared = 400000   (correct, 41 ms)
+without mutex: shared = 287341   (lost updates, 12 ms - fast and wrong)
+
+procs -----------memory---------- ---system--
+ r  b   swpd   free   buff  cache   in    cs
+ 3  0      0 812344  91280 402118  1204  18422    <- 18k switches/s: investigate
+```
+
+### Why Interviewers Ask This
+
+It is the base of every concurrency conversation, and the "why is this fast but wrong" race is a
+compact demonstration of understanding.
+
+### Common Mistakes
+
+- Saying threads have separate memory.
+- Believing more threads always means more throughput - beyond core count, switching dominates.
+- Not recognising `counter++` as three operations (load, add, store).
+- Confusing concurrency (interleaved progress) with parallelism (simultaneous execution).
+
+### Best Practices
+
+- Size thread pools near core count for CPU-bound work; higher for I/O-bound.
+- Prefer immutable data or message passing over shared mutable state.
+- Use processes when isolation matters (untrusted plugins, crash containment).
+- Watch involuntary context switches as a saturation signal.
+
+### Follow-up Questions
+
+1. What is a zombie process and how do you prevent one?
+2. Difference between user-level and kernel-level threads?
+3. What is copy-on-write in `fork()`?
+4. Why is a data race undefined behaviour rather than merely wrong?
+5. How do green threads and virtual threads change this picture?
+
+### Real-world Scenario
+
+An import service spawned one thread per file and processed 4,000 files concurrently on an
+8-core box. `vmstat` showed 60,000 context switches a second with the CPU 70 percent in system
+time; throughput was lower than with 8 threads. A bounded pool of 16 workers tripled throughput.
+
+---
+
+# SECTION 18: BEHAVIORAL AND HR
+
+## HR Q1
+
+**Difficulty:** Easy
+**Category:** Behavioral -> Self introduction
+
+### Question
+
+Tell me about yourself.
+
+### Answer
+
+This is not an invitation to narrate your CV. It is a 90-second positioning statement. Use
+**Present - Past - Future**:
+
+1. **Present (25s)** - current role, scope, and one quantified outcome.
+2. **Past (35s)** - the two or three experiences that qualify you for *this* role, chosen from the
+   job description, not chronologically.
+3. **Future (20s)** - why this company and this role, specifically, now.
+
+Rules: lead with the strongest signal, quantify at least once, and end with a hook the interviewer
+wants to pull on. Never recite dates, never mention family or hobbies unless asked, and never say
+"as you can see on my resume".
+
+### Example
+
+Answers for two levels.
+
+### Code Example
+
+```
+--- Mid-level backend engineer (2-5 years) ---
+"I'm a backend engineer with three years on Node and Postgres, currently at a logistics startup
+where I own the order pipeline - about 40,000 orders a day. My main piece of work last year was
+cutting our p99 checkout latency from 2.8 seconds to 400 milliseconds by parallelising service
+calls and fixing a deep-pagination query; that recovered around 8 percent of drop-off at
+checkout.
+
+Before that I was at a services company doing Spring Boot integrations for banking clients, which
+is where I learned to treat idempotency and audit trails as requirements rather than extras.
+
+I'm looking at your team because the job description mentions moving from a monolith to
+event-driven services - that's exactly the migration I ran last quarter, and I'd like to do it
+again with a team that has more scale than we do."
+
+--- Fresher / intern ---
+"I'm a final-year computer science student at [college], and my focus has been full-stack
+development. Most of what I know comes from building rather than coursework - my main project is a
+food-delivery app in the MERN stack that I put in front of real users through my college's food
+committee; about 200 students used it over a semester, and handling their concurrent orders is
+where I learned about race conditions and database transactions the hard way.
+
+Alongside that I've solved around 400 DSA problems, mostly arrays, trees and dynamic programming,
+because I wanted the fundamentals to be solid and not just framework knowledge.
+
+I'm applying here because your internship is backend-focused, and the systems problems you work on
+are the ones I've only been able to read about so far."
+```
+
+### Output
+
+```
+Structure check
+  length            80-100 seconds spoken
+  quantified facts  at least one number
+  tailoring         at least one reference to this specific role
+  hook              ends on something the interviewer will ask about
+```
+
+### Why Interviewers Ask This
+
+It sets the agenda. Whatever you emphasise is what they will probe, so you are effectively
+choosing the next ten minutes of the interview. It also tests whether you can structure
+information under mild pressure.
+
+### Common Mistakes
+
+- Chronological life story starting from school.
+- Five minutes long, or fifteen seconds long.
+- Identical answer regardless of company - interviewers hear the template.
+- Listing technologies with no outcome attached.
+- Mentioning salary, visa, or notice period unprompted.
+- Apologising for gaps or a lack of experience.
+
+### Best Practices
+
+- Write it, time it, say it aloud twenty times until it is natural rather than memorised.
+- Keep two versions: 90 seconds and 30 seconds.
+- Plant one deliberate hook you are ready to discuss in depth.
+- Update the last sentence for every company you apply to.
+
+### Follow-up Questions
+
+1. Tell me more about that latency work - what did you measure first?
+2. Why are you leaving your current role?
+3. What would you have done differently on that project?
+4. Walk me through the hardest technical decision you made there.
+
+### Real-world Scenario
+
+A candidate opened with three minutes on their B.Tech coursework and mentioned a distributed
+tracing project only in passing at the end. The interviewer had already spent the budget on
+generic questions, and the one genuinely differentiating experience never got explored. The same
+candidate, reordered to lead with tracing, converted the next loop.
+
+---
+
+## HR Q2
+
+**Difficulty:** Medium
+**Category:** Behavioral -> STAR method, failure
+
+### Question
+
+Tell me about a time you failed.
+
+### Answer
+
+They are testing **ownership and learning**, not looking for evidence against you. Use **STAR**:
+**S**ituation (context, briefly), **T**ask (your responsibility), **A**ction (what *you* did),
+**R**esult (outcome plus the lesson, ideally with a number).
+
+Rules for a failure story specifically:
+
+- Pick a **real** failure with real consequences. Fake ones ("I'm a perfectionist") read as evasion.
+- Own your part without blaming teammates - even when others contributed.
+- Spend most of the time on the **recovery and the systemic fix**, not the mistake.
+- Close with evidence the lesson stuck: a process you changed that is still in place.
+- Never choose a failure that reveals a disqualifying trait: missed deadlines through negligence,
+  hiding problems from stakeholders, or dishonesty.
+
+### Example
+
+A production incident told in STAR shape.
+
+### Code Example
+
+```
+S  "Two months into my current role I owned a migration adding a NOT NULL column to our
+    orders table - about 30 million rows."
+
+T  "I wrote the migration and was responsible for getting it to production safely."
+
+A  "I tested it on a staging copy that had 50,000 rows, so it ran in under a second and I
+    approved it for a Tuesday afternoon deploy. In production the ALTER took an
+    ACCESS EXCLUSIVE lock and rewrote the whole table. Checkout blocked for 11 minutes.
+    I noticed the alert, cancelled the migration, and confirmed rollback, then wrote the
+    postmortem myself rather than waiting to be asked."
+
+R  "Eleven minutes of failed checkouts, roughly 400 orders. What I changed: I rewrote it as
+    the three-phase pattern - add nullable, backfill in batches, then add the constraint
+    with NOT VALID and validate separately. I also added a rule to our migration checklist
+    that any DDL on a table over a million rows needs a timing test against a
+    production-sized snapshot, and I set a lock_timeout so a migration fails fast instead
+    of queueing behind traffic. That checklist item has caught two similar migrations since,
+    including one from a senior engineer."
+```
+
+### Output
+
+```
+Story quality checklist
+  real consequence stated        yes - 11 min, ~400 orders
+  personal ownership             yes - "I approved it"
+  no blame shifted               yes
+  systemic fix, not just "I'll be careful"  yes - checklist + lock_timeout
+  evidence the fix worked        yes - caught two later migrations
+  total length                   ~90 seconds
+```
+
+### Why Interviewers Ask This
+
+Everyone fails; they are measuring self-awareness, whether you fix causes or symptoms, and whether
+you are safe to trust with production. Candidates who cannot name a failure are usually either
+inexperienced or not reflective.
+
+### Common Mistakes
+
+- "I don't think I've really failed" - reads as arrogance or inexperience.
+- Humble-brag failures ("I work too hard").
+- Blaming QA, the previous team, or unclear requirements.
+- Choosing something trivial with no consequence.
+- Ending at the mistake with no lesson or systemic change.
+- Rambling through the situation and running out of time before the result.
+
+### Best Practices
+
+- Prepare four STAR stories that can be recut for many questions: a failure, a conflict, a
+  leadership moment, and a technical deep dive.
+- Keep Situation and Task to about 20 percent, Action and Result to 80 percent.
+- Quantify the result; numbers make a story credible.
+- Practise out loud and time it - 90 to 120 seconds.
+
+### Follow-up Questions
+
+1. What would you do differently if it happened again tomorrow?
+2. How did you tell your manager and the affected stakeholders?
+3. Has that lesson changed how you review other people's work?
+4. Tell me about a time you disagreed with your manager.
+5. What is the biggest risk you have taken at work?
+
+### Real-world Scenario
+
+Two candidates described the same class of incident. One said "the migration failed and we rolled
+back, I learned to be more careful". The other described the three-phase pattern, the
+`lock_timeout`, and the checklist that later caught a colleague's mistake. Only the second gave the
+interviewer any evidence that the failure produced durable change - and only the second got the
+offer.
+
+---
+
+
 # BUILD STATUS AND ROADMAP
 
-This book is being written in batches. This edition is **Batch 1**.
+This book is written in batches. **This edition contains 62 questions of a planned 1720.**
+Nothing here is placeholder text - every question listed below is complete, with runnable code,
+expected output and follow-ups. The remaining sections are genuinely not written yet.
 
 | Section | Topic | Target | Written | Status |
 | --- | --- | --- | --- | --- |
-| 1 | SQL | 150 | 20 | in progress |
-| 2 | MERN Stack | 120 | 0 | pending |
-| 3 | Internship and Fresher | 100 | 0 | pending |
-| 4 | Computer Networks | 100 | 0 | pending |
-| 5 | System Design | 120 | 0 | pending |
-| 6 | HTML | 60 | 0 | pending |
-| 7 | CSS | 100 | 0 | pending |
-| 8 | JavaScript | 150 | 0 | pending |
-| 9 | TypeScript | 80 | 0 | pending |
-| 10 | C# and .NET | 100 | 0 | pending |
-| 11 | Java | 120 | 0 | pending |
-| 12 | Linux | 100 | 0 | pending |
-| 13 | Data Structures and Algorithms | 150 | 0 | pending |
-| 14 | Object-Oriented Programming | 60 | 0 | pending |
-| 15 | DBMS | 80 | 0 | pending |
-| 16 | Operating Systems | 80 | 0 | pending |
-| 17 | Software Engineering Practice | 50 | 0 | pending |
-| 18 | Behavioral and HR | 100 | 0 | pending |
-| | **Total** | **1720** | **20** | **1.2 percent** |
+| 1 | SQL | 150 | 30 | in progress |
+| 2 | MERN Stack | 120 | 13 | in progress |
+| 3 | Internship and Fresher | 100 | 0 | not started |
+| 4 | Computer Networks | 100 | 2 | in progress |
+| 5 | System Design | 120 | 2 | in progress |
+| 6 | HTML | 60 | 0 | not started |
+| 7 | CSS | 100 | 0 | not started |
+| 8 | JavaScript | 150 | 7 | in progress |
+| 9 | TypeScript | 80 | 0 | not started |
+| 10 | C# and .NET | 100 | 0 | not started |
+| 11 | Java | 120 | 0 | not started |
+| 12 | Linux | 100 | 0 | not started |
+| 13 | Data Structures and Algorithms | 150 | 4 | in progress |
+| 14 | Object-Oriented Programming | 60 | 1 | in progress |
+| 15 | DBMS | 80 | 0 | not started |
+| 16 | Operating Systems | 80 | 1 | in progress |
+| 17 | Software Engineering Practice | 50 | 0 | not started |
+| 18 | Behavioral and HR | 100 | 2 | in progress |
+| | **Total** | **1720** | **62** | **3.6 percent** |
 
-## What Batch 1 contains
+## What is complete and usable today
 
-SQL questions 1 to 20, each with the full ten-part treatment, plus the shared sample database,
-seven coding challenges with solutions, and a revision sheet.
+**SQL (Q1-30)** is the most developed section and can be studied end to end: clause execution
+order, WHERE vs HAVING, aggregates and NULL semantics, three-valued logic, COALESCE and NULLIF,
+CASE and conditional pivoting, all five join types, the ON-vs-WHERE outer join trap, self joins,
+window function fundamentals, ROW_NUMBER vs RANK vs DENSE_RANK, LAG and LEAD, CTEs and
+materialisation, recursive CTEs with cycle guards, keys, set operators, keyset pagination, views
+and materialised views, deadlocks and lock ordering, normalisation 1NF to BCNF plus
+denormalisation, EXPLAIN plan reading, partitioning versus sharding, stored procedures, functions
+and triggers, GROUPING SETS and ROLLUP, indexes, ACID, isolation levels, and SQL injection. It
+includes a shared sample database, seven coding challenges with solutions, and two revision sheets.
 
-Coverage of the SQL syllabus so far:
+**MERN (Q1-13)** covers MongoDB document modelling, the aggregation pipeline, indexes and the ESR
+rule, replica sets with write concern and transactions, Express middleware and error handling, JWT
+authentication with refresh rotation, React state immutability, useEffect and race conditions,
+memoisation, the Virtual DOM and keys, state management choices, the Node event loop, and streams
+with backpressure.
 
-- Covered: `SELECT`, projection cost, logical clause order, `WHERE` vs `HAVING`, aggregates and
-  `NULL`, three-valued logic, `COALESCE`, `NULLIF`, `CASE`, conditional aggregation and
-  pivoting, all five join types, `ON` vs `WHERE` on outer joins, self joins, window function
-  fundamentals, `ROW_NUMBER`/`RANK`/`DENSE_RANK`, `LAG`/`LEAD`, CTEs and materialisation,
-  recursive CTEs, indexes (clustered, non-clustered, composite, partial, covering, expression),
-  ACID, isolation levels and concurrency anomalies, SQL injection.
-- Still to come in Section 1: `GROUP BY` advanced (`GROUPING SETS`, `ROLLUP`, `CUBE`), `LIMIT`
-  and keyset pagination, `DISTINCT` internals, set operators, all key types (primary, foreign,
-  composite, candidate, super, unique), views and materialised views, stored procedures,
-  functions, triggers, locks and deadlock resolution, normalisation 1NF to 5NF and
-  denormalisation, `EXPLAIN` plan reading, query optimisation patterns, partitioning, sharding,
-  full-text search, JSON columns, and a long set of interview-style query problems.
+**Other sections** have their opening questions written: JavaScript (hoisting, closures, `this`,
+event loop, promise combinators, debounce and throttle, prototypes), DSA (complexity, two pointers,
+sliding window, trees with BFS/DFS), System Design (capacity estimation, CAP and PACELC), Networks
+(TCP vs UDP, TLS and the URL walkthrough), OOP (SOLID), OS (process vs thread), Behavioral (self
+introduction, STAR failure story).
 
-## How the remaining batches are produced
+## Still to be written
 
-Each batch appends complete question blocks to `interview-1000-questions.md` and regenerates
-`Interview_1000_Questions.pdf` with `generate_interview_pdf.py`. Nothing already written is
-rewritten, so question numbers are stable and can be referenced across batches.
+Sections 3, 6, 7, 9, 10, 11, 12, 15 and 17 have no questions yet: Internship and fresher
+interviews, HTML, CSS, TypeScript, C# and .NET, Java, Linux, DBMS, and software engineering
+practice. The nine in-progress sections need their remaining questions, per-section coding
+challenges, mini-project discussions and revision notes.
+
+## How to continue the build
+
+Each batch appends complete question blocks to `interview-1000-questions.md` and regenerates the
+PDF. Nothing already written is rewritten, so question numbers are stable and can be cross
+referenced between batches.
 
 ```bash
-python3 generate_interview_pdf.py            # rebuild the PDF after any edit
+python3 generate_interview_pdf.py           # rebuild the PDF after any edit
+grep -c '^## ' interview-1000-questions.md  # question and section-heading count
 ```

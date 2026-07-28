@@ -398,7 +398,8 @@ def main():
     with open(dst, "wb") as fh:
         fh.write(data)
 
-    questions = len(re.findall(r"^## Question \d+", md, re.M))
+    # Question headings are section-prefixed: "## Question 1", "## MERN Q3", "## JS Q7", ...
+    questions = len(re.findall(r"^## (?:Question|[A-Z]{2,4} Q)\s*\d+", md, re.M))
     print(f"Output   : {dst}")
     print(f"Size     : {len(data) / 1024:.1f} KB")
     print(f"Pages    : {len(pages)}")
